@@ -7,3 +7,7 @@ Responsible for:
 - loop accept and fork;
 - overall cleanup of resources.
 */
+
+int main(int argc, char *argv[]) {
+    return 0;
+}

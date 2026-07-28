@@ -75,3 +75,15 @@ Decide wheter to end the program with an error, or to continue.
 
 ## Blocks
 - no `system()` or `popen()`, as well as no `exec()` except for `adduser`. Operations must be implemented with raw syscalls.
+
+
+## Architectural choices
+- For TCP, we define a specific frame format, to distinguish the different messages a server might receive. A format could be given by | preamble (x2 Byte) | command (x1 Byte)| len of payload (x2 Byte) | payload (xLen Bytes) | frame delimiter (x2 Byte) |. Similarly, for the answer | preamble (x2 Byte) | status (x1 Byte, OK, ERR)| len of payload (x2 Byte) | payload (xLen Bytes, either payload for OK, or err_code+ payload)| frame delimiter (x2 Byte) |
+- For each connection, we fork() a child, managing that user.
+
+
+
+
+
+
+

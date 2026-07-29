@@ -21,6 +21,7 @@ Responsible for:
 #include<sys/wait.h> // waitpid
 
 #define MAX_CLIENTS 10
+#define MAX_CLIENT_BUFFER 1024
 
 typedef struct {
     int sockfd;
@@ -146,7 +147,49 @@ int main(int argc, char *argv[]) {
     peer_t clients[MAX_CLIENTS];
     memset(clients, 0, sizeof(clients));
 
+    while(1){
+        // use select() to wait for activity on the listening socket or any of the connected sockets
+        int activity = select(s + 1, &readfds, &writefds, &exceptfds, NULL);
+        if(activity < 0) {
+            perror("select");
+            break;
+        }
 
+        // check if there is a new connection on the listening socket
+        if(FD_ISSET(s, &readfds)) {
+            handle_new_connection(s, clients); // accept new connection and add to clients array
+        }
+
+        // check for activity on each connected socket, spawn a process with fork() to handle the connection
+        for(int i = 0; i < MAX_CLIENTS; i++) {
+            if(clients[i].sockfd > 0 && FD_ISSET(clients[i].sockfd, &readfds)) {
+                // spawn a new process to handle the connection
+                pid_t pid = fork();
+                if(pid < 0) {
+                    perror("fork");
+                    continue;
+                }
+                if(pid == 0) { // child process
+                    close(s); // close the listening socket in the child process
+                    char buffer[MAX_CLIENT_BUFFER];
+                    int bytes_received = recv(clients[i].sockfd, buffer, sizeof(buffer), 0);
+                    if(bytes_received < 0) {
+                        perror("recv");
+                        exit(EXIT_FAILURE);
+                    }
+                    buffer[bytes_received] = '\0'; // null-terminate the received data
+                    printf("Received from client: %s", buffer);
+                    send(clients[i].sockfd, buffer, bytes_received, 0); // echo back to client
+                    close(clients[i].sockfd); // close the connected socket in the child process
+                    exit(EXIT_SUCCESS);
+                } else { // parent process
+                    close(clients[i].sockfd); // close the connected socket in the parent process
+                    clients[i].sockfd = 0; // mark the slot as empty
+                }
+            }
+        }
+
+    }
 
     close(s);
 

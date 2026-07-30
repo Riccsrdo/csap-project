@@ -13,6 +13,7 @@ Responsible for:
 #include<arpa/inet.h> // inet_pton
 #include<string.h>
 #include<unistd.h>
+#include<limits.h>
 
 #define MAX_CLIENT_BUFFER 1024
 #define MAX_SERVER_BUFFER 1024
@@ -46,8 +47,29 @@ int start_client() {
     return sockfd;
 }
 
+// takes the readfds set, the socket_fd and the pipe of child processes running commands in background
+void configure_read_set(fd_set *readfds, int socket_fd, int pipe_fd) {
+    FD_ZERO(readfds);
+    FD_SET(STDIN_FILENO, readfds); // add stdin to the set
+    FD_SET(socket_fd, readfds); // add the socket to the set
+    if(pipe_fd >= 0) {
+        FD_SET(pipe_fd, readfds); // add the pipe to the set if valid
+    }
+}
+
 int main(int argc, char *argv[]) {
+
+    fd_set readfds;
+
     int s = start_client();
+
+    // create a pipe for communication with child processes
+    int pipe_fd[2];
+    if(pipe(pipe_fd) < 0) {
+        perror("pipe");
+        close(s);
+        exit(EXIT_FAILURE);
+    }
 
     while(1){
         printf("Client: \t");

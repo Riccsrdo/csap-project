@@ -1,0 +1,83 @@
+## OBJECTIVE
+ Creation of a client-server system, that manages virtual home directories for users created on the fly. The server maintains a storage space for each user, allowing file management operations, even with concurrent interaction.
+
+## ARCHITECTURE
+- Server;
+- Client.
+
+## SERVER
+Responsible for the maintenance of users, credentials and the virtual file system. We provide a root directory at startup on which the virtual file system is mounted. Each operation performed by a client must be performed within this root directory. The client cannot escape his home directory and root directory, he can only use `list` to go outside user's home (not outside root dir). List will function correctly as long as other users did not setup permissions for their own created directories/files that blocks access to other members in the group. (see `list` specification later).
+
+The server must support multiple clients operating at the same time, either through forking or through multiple processes.
+
+When initially launching the server, we must pass:
+- `<root_directory>`
+- `<IP>`
+- `<port>`
+
+`<IP>` and `<port>` defines the IP and port where the server listens for requests.
+- Default: 127.0.0.1:8080
+
+In `<root_directory>` the server keeps the user's home, their files and metadata.
+- Important: if the directory does not exist, we must create it.
+
+### User management
+We need to support the dynamic creation of users through `create_user <username> <permission (in octal)>`. After creating a user, we need to create its home directory (with the new user being the owner, and with correct permissions applied).
+- Important: all users must share the same group (e.g. remote_users).
+
+Furthermore, we need to create a real user (for each user added) in the system (through the `exec()` function), using `adduser`, specifically `sudo adduser --disabled-password username`.
+
+If necessary, the server can be run with `sudo`, but we must maintain `euid=root` for the smallest amount of time possible.
+
+All prints and errors must be pushed to the client's `stdout`.
+
+## CLIENT
+Needs to be able to authenticate to the server, and send commands.
+
+Parallelization between multiple clients is possible, performing operations on the same file simultaneously:
+- When someone is reading, no one can write
+- When someone is writing, no one else can write
+- Delete is handled as a write
+Though, if multiple users are performing operations, they shouldn't be blocked directly.
+
+Communication between client and server takes place through the use of sockets.
+
+Setup takes place passing `<IP> <port>` of the server to which we want to connect.
+Once connected, we log to the server using `login <username>` command. We can implement a mechanism of authentication, requiring us to verify (even without a password) the owner of the commands.
+Once logged in, operations for the management of the file system performed by the user are executed within its home directory, and they could be logged (knowing it's the user performing them, and not the server in its behalf).
+
+### Permitted operations
+- `create <path> <permissions (in octal)>`: creates an empty file in the specified path with given permissions, using `-d` allows to obtain a directory, instead.
+- `chmod <path> <permissions (in octal)>`: allows to set the specified file/dir path to the given permissions.
+- `move <path1> <path2>`: moves a file from path1 to path2.
+- `upload <client path> <server path>`: the client sends the file in its path through the socket to the server, given the specified path. We need to implement `-b` to allow background uploads, allowing the user to perform other operations in the meanwhile. When the background operation is concluded, the client notifies the user with `“[Background] Command: upload <server path> <client path> concluded`. 
+- `download <server path> <client path>`: the server sends the file specified through the socket, and the client saves it. Similarly to `upload`, we need the `-b` option, with the final notification: `[Background] Command: download <server path> <client path> concluded`.
+- `cd <path>`: change curr. work. dir.
+- `list <path>`: we need to list the files, also printing permissions and logical size. If no `<path>` is given, we print the content of the current working dir. IMPORTANT: We need to allow the listing of other users' home.
+- `read <path>`: allows to read the content of the path in `stdout`. We can specify with `-offset=<num>` to start the reading from an offset given by `<num>`.
+- `write <path>`: similar to read, content is read from `stdin` and written in `<path>`. If the file does not exist, we create it with permissions `0700`. Also here, we can specify the offset num option.
+- `delete <path>`: deletes path file.
+- `transfer_request <file> <dest_user>`: with the file we decide a file belonging to the user, while with dest user to inteded recipient. Each transfer request must have an associated `<ID>`, generated by the system. The target user must be online when this request is taking place. When the sender performs the request, we notify the target user about the process, sending the `<ID>` as well. He can then do: `accept <directory> <ID>`, accepting the request, and forcing the server to copy the file from `<file>` in the specified `<directory>`; simply `reject`. Parallelization in sending transfer requests must be handled, though we can assume we have just one logged recipient. If the recipient is not logged in, we need the operations to be blocking, waiting for the recipient to log.
+
+If the user sends `exit` to the server (not through the client), the server is terminated.
+If the `exit` is sent to the client, the connection is terminated (with the process), but only if no background operations are taking place. In that case, we capture the termination, notify the user about background operations, and allow further requests by the user to the client.
+
+Important: the `<path>` must also accept `.` and `..`.
+
+## ERROR HANDLING
+- Manage I/O errors;
+- Handle unexpected terminations (both clients and server);
+- Eliminate zombie processes;
+- Prevent race conditions;
+- Notify the user when commands requiring parameters are launched without the correct parameters.
+
+Decide wheter to end the program with an error, or to continue.
+
+## Blocks
+- no `system()` or `popen()`, if necessary use `fork() + exec() + pipe + dup2()`.
+
+
+
+
+
+

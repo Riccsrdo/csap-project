@@ -23,11 +23,6 @@ Responsible for:
 #define MAX_CLIENTS 10
 #define MAX_CLIENT_BUFFER 1024
 
-typedef struct {
-    int sockfd;
-    struct sockaddr_in address;
-} peer_t;
-
 void handle_signals(int sig) {
     // wait for all dead processes (SIGCHLD) without blocking
     while(waitpid(-1, NULL, WNOHANG) > 0);
@@ -50,24 +45,29 @@ int setup_signal_handler() {
 Start server, listen on localhost:8080, return the socket descriptor.
 */
 
-int start_server(){
+int start_server(char *ip_address, char *port_number){
 
     // create TCP socket with SO_LINGER option set to 1, which means that when the socket is closed, 
     // the system will try to send any remaining data for a short period of time before forcefully 
     // closing the connection.
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    int linger = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger));
+    if(sockfd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    int opt1  = 1;
+    // Set SO_REUSEADDR to allow the socket to be bound to an address that is already in use.
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt1, sizeof(opt1)); 
+
 
     struct sockaddr_in server_address;
     memset(&server_address, 0, sizeof(server_address));
 
-    // Initial message
-    char *msg = "Hello client! :D\n";
 
     server_address.sin_family = AF_INET;
-    server_address.sin_port = htons(8080);
-    inet_aton("127.0.0.1", &server_address.sin_addr);
+    server_address.sin_port = htons(atoi(port_number));
+    inet_aton(ip_address, &server_address.sin_addr);
 
     // Bind the socket to the address
     if(bind(sockfd, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
@@ -87,108 +87,133 @@ int start_server(){
 
 }
 
-int build_fd_set(fd_set *readfds, fd_set *writefds, fd_set *exceptfds) {
-    int i;
-
+void configure_read_set(fd_set *readfds, int socket_fd) {
     FD_ZERO(readfds);
-    FD_ZERO(writefds);
-    FD_ZERO(exceptfds);
-
-    // add entries to the sets
-
-    return 0;
-}
-
-int handle_new_connection(int sockfd, peer_t *clients){
-
-    struct sockaddr_in client_address;
-    memset(&client_address, 0, sizeof(client_address));
-    socklen_t client_address_len = sizeof(client_address);
-    int client_sock = accept(sockfd, (struct sockaddr*)&client_address, &client_address_len);
-    if(client_sock < 0) {
-        perror("accept");
-        return -1;
-    }
-
-    // look for an empty slot in the clients array
-    for(int i = 0; i < MAX_CLIENTS; i++) {
-        if(clients[i].sockfd == 0) {
-            clients[i].sockfd = client_sock;
-            clients[i].address = client_address;
-            return 0;
-        }
-    }
-
-    close(client_sock); // no empty slot, close the new connection
-    fprintf(stderr, "Max clients reached, rejecting new connection.\n");
-
-    return -1;
+    FD_SET(STDIN_FILENO, readfds); // add stdin to the set
+    FD_SET(socket_fd, readfds); // add the socket to the set
 }
 
 
+
+/*
+Main
+
+takes three arguments:
+- root directory for the server to serve files from;
+- IP address to bind to, default is 127.0.0.1;
+- port number to bind to, default is 8080.
+*/
 int main(int argc, char *argv[]) {
+
+    if(argc < 2) {
+        fprintf(stderr, "Usage: %s <root_directory> [<IP>] [<port>]\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    char *root_directory = argv[1];
+    char *ip_address = (argc > 2) ? argv[2] : "127.0.0.1";
+    char *port_number = (argc > 3) ? argv[3] : "8080";
 
     if(setup_signal_handler() < 0) {
         fprintf(stderr, "Failed to setup signal handler.\n");
         exit(EXIT_FAILURE);
     }
 
-    int s = start_server();
+    int s = start_server(ip_address, port_number);
 
-    // handle new connections through accept, without continuously polling, and assigning a new process to each connection through fork.
-    // use select() for handling read()/write() on multiple sockets, including the listening socket and the connected sockets.
-    fd_set readfds; // used for monitoring multiple file descriptors to see if they are ready for reading
-    fd_set writefds; // used for monitoring multiple file descriptors to see if they are ready for writing
-    fd_set exceptfds; // used for monitoring multiple file descriptors to see if they have an exceptional condition pending
+    fd_set readfds;
+    configure_read_set(&readfds, s);
 
+    // determine max file descriptor for select() between stdin and listen socket
+    int max_fd = (s > STDIN_FILENO) ? s : STDIN_FILENO;
 
-    build_fd_set(&readfds, &writefds, &exceptfds);
+    int clients = 0; // number of currently connected clients
+    struct sockaddr_in clientAddress; // address struct to hold the client address information
+    socklen_t clientAddressLen = sizeof(clientAddress); // len of the client address struct
+    int clientSocket; // fd used for the accepted connection
+    int select_result; // result of select()
+    char buffer[MAX_CLIENT_BUFFER]; // buffer for reading data from clients or stdin
 
-    peer_t clients[MAX_CLIENTS];
-    memset(clients, 0, sizeof(clients));
-
+    /*
+    loop:
+    cfd = accept(listenfd)          
+    pid = fork()
+    if figlio:  close(listenfd); handle_client_session(cfd); _exit()
+    if padre:   close(cfd), torna ad accept()
+    */
     while(1){
-        // use select() to wait for activity on the listening socket or any of the connected sockets
-        int activity = select(s + 1, &readfds, &writefds, &exceptfds, NULL);
-        if(activity < 0) {
+        // clean file descriptor set
+        configure_read_set(&readfds, s);
+
+        // select() will block, waiting for activity
+        select_result = select(max_fd + 1, &readfds, NULL, NULL, NULL);
+        if(select_result < 0) {
             perror("select");
-            break;
+            break; // exit the loop on error
         }
 
-        // check if there is a new connection on the listening socket
-        if(FD_ISSET(s, &readfds)) {
-            handle_new_connection(s, clients); // accept new connection and add to clients array
-        }
+        // check first if there is activity on stdin (server operator input)
+        if(FD_ISSET(STDIN_FILENO, &readfds)) {
+            if(fgets(buffer, sizeof(buffer), stdin) == NULL) {
+                // error or EOF
+                if(feof(stdin)) {
+                    printf("EOF on stdin, exiting.\n");
+                    break; // exit the loop on EOF
+                } else {
+                    perror("fgets");
+                    continue; // continue to next iteration on error
+                }
+            }
 
-        // check for activity on each connected socket, spawn a process with fork() to handle the connection
-        for(int i = 0; i < MAX_CLIENTS; i++) {
-            if(clients[i].sockfd > 0 && FD_ISSET(clients[i].sockfd, &readfds)) {
-                // spawn a new process to handle the connection
-                pid_t pid = fork();
-                if(pid < 0) {
-                    perror("fork");
-                    continue;
-                }
-                if(pid == 0) { // child process
-                    close(s); // close the listening socket in the child process
-                    char buffer[MAX_CLIENT_BUFFER];
-                    int bytes_received = recv(clients[i].sockfd, buffer, sizeof(buffer), 0);
-                    if(bytes_received < 0) {
-                        perror("recv");
-                        exit(EXIT_FAILURE);
-                    }
-                    buffer[bytes_received] = '\0'; // null-terminate the received data
-                    printf("Received from client: %s", buffer);
-                    send(clients[i].sockfd, buffer, bytes_received, 0); // echo back to client
-                    close(clients[i].sockfd); // close the connected socket in the child process
-                    exit(EXIT_SUCCESS);
-                } else { // parent process
-                    close(clients[i].sockfd); // close the connected socket in the parent process
-                    clients[i].sockfd = 0; // mark the slot as empty
-                }
+            // handle command
+            buffer[strcspn(buffer, "\n")] = 0; // remove newline character
+            if(strcmp(buffer, "exit") == 0) {
+                printf("Exiting server.\n");
+                break; // exit the loop on "exit" command
+            } else {
+                printf("Unknown command: %s\n", buffer);
             }
         }
 
+        if(FD_ISSET(s, &readfds)) {
+            // there is a new incoming connection on the listening socket
+            // accept the connection and handle it in a new process
+            // accept a new connection
+            clientSocket = accept(s, (struct sockaddr*)&clientAddress, &clientAddressLen);
+
+            // if number of clients exceeds MAX_CLIENTS, reject the connection
+            if(clients >= MAX_CLIENTS) {
+                fprintf(stderr, "Max clients reached. Rejecting connection.\n");
+                close(clientSocket);
+                continue;
+            }
+
+            if(clientSocket < 0) {
+                perror("accept");
+                // TODO: appropriate error handling, maybe continue or exit
+                continue;
+            }
+
+            // fork a new process to handle the client
+            pid_t pid = fork();
+            if(pid < 0) {
+                perror("fork");
+                close(clientSocket);
+                continue;
+            } else if(pid == 0) { // child process
+                close(s); // child does not need the listening socket
+
+                // handle the client session and the exit
+
+
+            } else { // parent process
+                close(clientSocket); // parent does not need the connected socket
+                // TODO: implement parent process logic
+                clients++;
+            }
+        }
+
+        
     }
 
     close(s);

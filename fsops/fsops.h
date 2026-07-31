@@ -11,9 +11,11 @@
 #include <time.h> // for time functions
 #include<dirent.h> // for opening and managing directories
 #include<string.h> // for string manipulation functions
+#include<errno.h> // for error handling
+#include"../utils/utils.h"
 
 
-int list(char *path, char *out_buffer, size_t buffer_size);
+int list(char *path, strbuf_t *sb);
 
 
 #endif

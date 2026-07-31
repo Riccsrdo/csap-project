@@ -17,6 +17,7 @@ Responsible for:
 #include<signal.h>
 #include<fcntl.h> // fcntl
 #include<sys/wait.h> // waitpid
+#include<errno.h> // EINTR
 
 #define MAX_CLIENT_BUFFER 1024
 #define MAX_SERVER_BUFFER 1024
@@ -24,7 +25,9 @@ Responsible for:
 // Handle SIGCHLD to reap child processes and avoid zombies
 void handle_signal_child(int sig) {
     // wait for all dead processes (SIGCHLD) without blocking
+    int saved_errno = errno; 
     while(waitpid(-1, NULL, WNOHANG) > 0);
+    errno = saved_errno; // restore errno
 }
 
 // Handler for signals
@@ -57,9 +60,19 @@ int start_client(char *ip_address, char *port_number){
     memset(&server_address, 0, sizeof(server_address)); // prepare memory for the struct
 
     server_address.sin_family = AF_INET; // IPv4
-    server_address.sin_port = htons(atoi(port_number)); // port number, converted to network byte order
+    int port = atoi(port_number); // convert port number from string to integer
+    if(port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port number: %s\n", port_number);
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+    server_address.sin_port = htons(port); // port number, converted to network byte order
 
-    inet_aton(ip_address, &server_address.sin_addr); // convert string to network address
+    if(inet_aton(ip_address, &server_address.sin_addr) == 0) { // convert string to network address
+        fprintf(stderr, "Invalid IP address: %s\n", ip_address);
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
 
     if(connect(sockfd, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
         perror("connect");
@@ -93,12 +106,6 @@ int main(int argc, char *argv[]) {
     // to avoid termination of the client when a child process tries to write to a closed socket
     signal(SIGPIPE, SIG_IGN);
 
-    // Check command line arguments for IP and port, set defaults if not provided
-    if(argc < 1) {
-        fprintf(stderr, "Usage: %s [<IP>] [<port>]\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-
     char *ip_address = (argc > 1) ? argv[1] : "127.0.0.1";
     char *port_number = (argc > 2) ? argv[2] : "8080";
 
@@ -115,8 +122,6 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    configure_read_set(&readfds, s, pipe_fd[0]);
-
     int select_result; // result of the select() call in the main loop
 
     while(1){
@@ -125,6 +130,11 @@ int main(int argc, char *argv[]) {
 
         // select() blocks, waiting for activity either on stdin, the socket, or the pipe
         select_result = select(FD_SETSIZE, &readfds, NULL, NULL, NULL);
+
+        if (select_result < 0) {
+            if (errno == EINTR) continue;
+            perror("select"); break;
+        }
 
         if(select_result < 0) {
             perror("select");
@@ -138,7 +148,8 @@ int main(int argc, char *argv[]) {
 
             // if -b option is contained in upload/download command, fork a child 
             // process to handle the command in background, and use the pipe to communicate with the main process
-
+            /* TODO: implement mechanism for -b
+            fflush(NULL);
             pid_t pid = fork();
             if(pid < 0) {
                 perror("fork");
@@ -149,9 +160,9 @@ int main(int argc, char *argv[]) {
                 // after handling, exit the child process
                 _exit(0);
             } else { // parent process
-                close(pipe_fd[1]); // close write end of the pipe in the parent
                 // continue to next iteration to wait for more input or server response
             }
+                */
 
         }
 

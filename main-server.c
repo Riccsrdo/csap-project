@@ -19,13 +19,16 @@ Responsible for:
 #include<signal.h>
 #include<fcntl.h> // fcntl
 #include<sys/wait.h> // waitpid
+#include<errno.h>
 
-#define MAX_CLIENTS 10
 #define MAX_CLIENT_BUFFER 1024
 
 void handle_signals(int sig) {
     // wait for all dead processes (SIGCHLD) without blocking
-    while(waitpid(-1, NULL, WNOHANG) > 0);
+    int saved_errno = errno;
+    while(waitpid(-1, NULL, WNOHANG) > 0){
+    }
+    errno = saved_errno;
 }
 
 int setup_signal_handler() {
@@ -66,8 +69,18 @@ int start_server(char *ip_address, char *port_number){
 
 
     server_address.sin_family = AF_INET;
-    server_address.sin_port = htons(atoi(port_number));
-    inet_aton(ip_address, &server_address.sin_addr);
+    int port = atoi(port_number); // convert port number from string to integer
+    if(port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port number: %s\n", port_number);
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+    server_address.sin_port = htons(port);
+    if(inet_aton(ip_address, &server_address.sin_addr) == 0) {
+        fprintf(stderr, "Invalid IP address: %s\n", ip_address);
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
 
     // Bind the socket to the address
     if(bind(sockfd, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
@@ -77,7 +90,7 @@ int start_server(char *ip_address, char *port_number){
     }
 
     // listen for incoming connections
-    if(listen(sockfd, MAX_CLIENTS) < 0) {
+    if(listen(sockfd, 10) < 0) {
         perror("listen");
         close(sockfd);
         exit(EXIT_FAILURE);
@@ -91,6 +104,9 @@ void configure_read_set(fd_set *readfds, int socket_fd) {
     FD_ZERO(readfds);
     FD_SET(STDIN_FILENO, readfds); // add stdin to the set
     FD_SET(socket_fd, readfds); // add the socket to the set
+}
+
+void handle_session(int clientSocket) {
 }
 
 
@@ -114,20 +130,22 @@ int main(int argc, char *argv[]) {
     char *ip_address = (argc > 2) ? argv[2] : "127.0.0.1";
     char *port_number = (argc > 3) ? argv[3] : "8080";
 
+    // handle_root_directory(root_directory); // TODO: implement this func to construct root path, validate it
+
     if(setup_signal_handler() < 0) {
         fprintf(stderr, "Failed to setup signal handler.\n");
         exit(EXIT_FAILURE);
     }
 
+    signal(SIGPIPE, SIG_IGN);
+
     int s = start_server(ip_address, port_number);
 
     fd_set readfds;
-    configure_read_set(&readfds, s);
 
     // determine max file descriptor for select() between stdin and listen socket
     int max_fd = (s > STDIN_FILENO) ? s : STDIN_FILENO;
 
-    int clients = 0; // number of currently connected clients
     struct sockaddr_in clientAddress; // address struct to hold the client address information
     socklen_t clientAddressLen = sizeof(clientAddress); // len of the client address struct
     int clientSocket; // fd used for the accepted connection
@@ -147,9 +165,8 @@ int main(int argc, char *argv[]) {
 
         // select() will block, waiting for activity
         select_result = select(max_fd + 1, &readfds, NULL, NULL, NULL);
-        if(select_result < 0) {
-            perror("select");
-            break; // exit the loop on error
+        if (select_result < 0) {
+            if (errno == EINTR) continue;
         }
 
         // check first if there is activity on stdin (server operator input)
@@ -178,14 +195,15 @@ int main(int argc, char *argv[]) {
         if(FD_ISSET(s, &readfds)) {
             // there is a new incoming connection on the listening socket
             // accept the connection and handle it in a new process
-            // accept a new connection
+
+            // reset clientAddressLen before each accept call
+            clientAddressLen = sizeof(clientAddress);
+
             clientSocket = accept(s, (struct sockaddr*)&clientAddress, &clientAddressLen);
 
-            // if number of clients exceeds MAX_CLIENTS, reject the connection
-            if(clients >= MAX_CLIENTS) {
-                fprintf(stderr, "Max clients reached. Rejecting connection.\n");
-                close(clientSocket);
-                continue;
+            if(clientSocket < 0) {
+                perror("accept");
+                continue; // continue to next iteration on error
             }
 
             if(clientSocket < 0) {
@@ -195,6 +213,7 @@ int main(int argc, char *argv[]) {
             }
 
             // fork a new process to handle the client
+            fflush(NULL);
             pid_t pid = fork();
             if(pid < 0) {
                 perror("fork");
@@ -204,12 +223,12 @@ int main(int argc, char *argv[]) {
                 close(s); // child does not need the listening socket
 
                 // handle the client session and the exit
+                handle_session(clientSocket);
 
-
+                _exit(0); // after client session is handled, exit the child process
             } else { // parent process
                 close(clientSocket); // parent does not need the connected socket
                 // TODO: implement parent process logic
-                clients++;
             }
         }
 

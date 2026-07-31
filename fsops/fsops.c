@@ -5,21 +5,25 @@ Responsible for:
 */
 #include"fsops.h"
 
+
 // -----------------------------------------------------------------------------------------------------
 // ----------------------------------------- list() ----------------------------------------------------
 // -----------------------------------------------------------------------------------------------------
 
 // Construct file info, given a path and a stat struct, and append it to the output buffer
-void constructFileInfo(char *out_buffer, size_t buffer_size, struct stat *fileStat, const char *filename) {
-    size_t current_len = strlen(out_buffer);
-    
-    if (current_len >= buffer_size) {
-        return;
-    }
-
+int constructFileInfo(strbuf_t *sb, struct stat *fileStat, const char *filename) {
     // build the permission string
     char perms[11];
-    perms[0] = (S_ISDIR(fileStat->st_mode)) ? 'd' : '-';
+    switch(fileStat->st_mode & S_IFMT){
+        case S_IFREG: perms[0] = '-'; break;
+        case S_IFDIR: perms[0] = 'd'; break;
+        case S_IFLNK: perms[0] = 'l'; break;
+        case S_IFIFO: perms[0] = 'p'; break;
+        case S_IFSOCK: perms[0] = 's'; break;
+        case S_IFCHR: perms[0] = 'c'; break;
+        case S_IFBLK: perms[0] = 'b'; break;
+        default: perms[0] = '?'; break;
+    }
     perms[1] = (fileStat->st_mode & S_IRUSR) ? 'r' : '-';
     perms[2] = (fileStat->st_mode & S_IWUSR) ? 'w' : '-';
     perms[3] = (fileStat->st_mode & S_IXUSR) ? 'x' : '-';
@@ -42,8 +46,10 @@ void constructFileInfo(char *out_buffer, size_t buffer_size, struct stat *fileSt
         }
     }
 
+    char line[1024]; // temporary buffer to hold the formatted line
+
     // append remaining details to the output buffer
-    int written = snprintf(out_buffer + current_len, buffer_size - current_len,
+    int written = snprintf(line, sizeof(line),
                            "%s %u %u %lu %lld %s %s\n",
                            perms,
                            (unsigned int)fileStat->st_uid,
@@ -53,10 +59,17 @@ void constructFileInfo(char *out_buffer, size_t buffer_size, struct stat *fileSt
                            time_buf,
                            filename);
 
-    if (written < 0 || (size_t)written >= buffer_size - current_len) {
+    if (written < 0 || written >= sizeof(line)) {
         // error
-        return;
+        return -1;
     }
+
+    // Append string using sb_append()
+    if(sb_append(sb, line, strlen(line)) < 0) {
+        return -ENOMEM; // memory allocation error
+    }
+
+    
 }
 
 
@@ -67,10 +80,21 @@ list() function:
 - takes an optional path argument; if no path is given, lists the current working directory; path can be a single file or directory;
 - allow navigation to other users' home directories.
 
-- fills a buffer with the list info
+- fills a custom str_buffer with the list info
 - returns 0 on success, -1 on error
 */
-int list(char *path, char *out_buffer, size_t buffer_size) {
+int list(char *path, strbuf_t *sb) {
+
+    if(sb == NULL) {
+        return -EINVAL; // invalid argument
+    }
+
+    if(sb->data == NULL) {
+        sb_init(sb);
+        if(sb->data == NULL) {
+            return -ENOMEM; // memory allocation error[cite: 1]
+        }
+    }
 
     struct stat fileStat; // struct to hold file information
 
@@ -81,8 +105,7 @@ int list(char *path, char *out_buffer, size_t buffer_size) {
 
     // open path with lstat to get file information
     if(lstat(path, &fileStat) < 0){
-        perror("lstat");
-        return -1;
+        return -errno;
     }
 
     // check if path is a directory or a file
@@ -90,8 +113,7 @@ int list(char *path, char *out_buffer, size_t buffer_size) {
         // if path is a directory, open it
         DIR *dir = opendir(path);
         if(dir == NULL){
-            perror("opendir");
-            return -1;
+            return -errno;
         }
 
         struct dirent *entry; // struct to hold directory entry information
@@ -103,21 +125,38 @@ int list(char *path, char *out_buffer, size_t buffer_size) {
                 continue;
             }
             // create full path for the entry
-            char fullPath[1024];
+            char fullPath[PATH_MAX];
             snprintf(fullPath, sizeof(fullPath), "%s/%s", path, entry->d_name);
             // get file information for the entry
             if(lstat(fullPath, &fileStat) < 0){
-                perror("lstat");
-                return -1;
+                continue; // skip this entry on error
             }
             // construct buffer with file information
-            constructFileInfo(out_buffer, buffer_size, &fileStat, entry->d_name);
+            switch(constructFileInfo(sb, &fileStat, entry->d_name)){
+                case -ENOMEM:
+                    closedir(dir);
+                    return -ENOMEM; 
+                case -1:
+                    closedir(dir);
+                    return -1; 
+                default:
+                    break; 
+            }
 
         }
         closedir(dir); // close the directory
     } else {
         // if path is a file, print its information
-        constructFileInfo(out_buffer, buffer_size, &fileStat, path);
+        switch(constructFileInfo(sb, &fileStat, path)){
+            case -ENOMEM:
+                return -ENOMEM; 
+            case -EINVAL:
+                return -EINVAL; 
+            case -1:
+                return -1; 
+            default:
+                break; 
+        }
     }
 
     return 0; // success

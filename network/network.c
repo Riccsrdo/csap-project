@@ -39,7 +39,10 @@ int receive_data(int sockfd, void *buf, size_t len){
 
     while(len > 0){
         int n = recv(sockfd, ptr, len, 0);
-        if(n<=0){
+        if (n == 0) { // EOF, connection closed by the peer
+            return -1;
+        }
+        if(n < 0){
             if(errno == EINTR) // if interrupted by signal, retry
                 continue;
             return -1;
@@ -58,18 +61,21 @@ Packet format (server -> client)
 */
 
 int build_packet(char *buf, uint8_t command, const char *payload, uint32_t payload_len){
-    uint16_t preamble = PREAMBLE;
+    // write preamble in big-endian
+    uint16_t preamble = htons(PREAMBLE);
     memcpy(buf, &preamble, sizeof(preamble));
     buf += sizeof(preamble);
     memcpy(buf, &command, sizeof(command));
     buf += sizeof(command);
-    memcpy(buf, &payload_len, sizeof(payload_len));
-    buf += sizeof(payload_len);
-    memcpy(buf, payload, payload_len);
+    uint32_t payload_len_network = htonl(payload_len); // similarly convert payload_len to network byte order
+    memcpy(buf, &payload_len_network, sizeof(payload_len_network));
+    buf += sizeof(payload_len_network);
+    if(payload_len > 0 && payload != NULL)
+        memcpy(buf, payload, payload_len);
     return 0;
 }
 
-int send_all(int sockfd, const void *buf, size_t len, uint8_t command, const char *payload, uint32_t payload_len){
+int send_packet(int sockfd, uint8_t command, const char *payload, uint32_t payload_len){
     char *packet = malloc(sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint32_t) + payload_len);
     if(packet == NULL){
         free(packet);
@@ -81,11 +87,12 @@ int send_all(int sockfd, const void *buf, size_t len, uint8_t command, const cha
     return ret;
 }
 
-int recv_all(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len){
+int recv_packet(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len){
     uint16_t preamble;
     if(receive_data(sockfd, &preamble, sizeof(preamble)) < 0){
         return -1;
     }
+    preamble = ntohs(preamble); // convert from network to host byte order
     if(preamble != PREAMBLE){
         return -1;
     }
@@ -95,10 +102,15 @@ int recv_all(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len){
     if(receive_data(sockfd, payload_len, sizeof(*payload_len)) < 0){
         return -1;
     }
-    *buf = malloc(*payload_len);
+    *payload_len = ntohl(*payload_len); // convert payload_len from network to host byte order
+    if(*payload_len > MAX_PAYLOAD_SIZE){ // check if payload_len is corrupted or too large
+        return -1;
+    }
+    *buf = malloc(*payload_len +1); // allocate memory for the payload, +1 for null terminator
     if(*buf == NULL){
         return -1;
     }
+    (*buf)[*payload_len] = '\0'; // null terminate the payload
     if(receive_data(sockfd, *buf, *payload_len) < 0){
         free(*buf);
         return -1;

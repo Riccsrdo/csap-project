@@ -16,7 +16,6 @@ typedef struct {
     char home_path[PATH_MAX]; // home directory of the logged-in user
     char root_path[PATH_MAX]; // root of the server
     int notify_fd; // file desc. for a pipe, used for handling transfer_requests between sessions
-    int notify_resp_fd; // file desc. for a pipe, used for handling transfer_responses between sessions
 } session_t;
 
 typedef struct {

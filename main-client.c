@@ -127,24 +127,7 @@ int wait_response(int fd){
             free(payload);
             return -1;
         }
-
-        if(command == RSP_NOTIFY){
-            printf("%s \n", (char *)payload);
-            free(payload);
-            continue;
-        }
-
-        if(command == RSP_ERR){
-            fprintf(stderr, "Server error: %s\n", (char *)payload);
-            free(payload);
-            return -1;
-        }
-
-        if(command == RSP_OK){
-            printf("Server: %s\n", (char *)payload);
-            free(payload);
-            return 0;
-        }
+        // print, based on error code/success code, related message to stdout
     }
 
     // should not reach here
@@ -323,7 +306,12 @@ int main(int argc, char *argv[]) {
                 buf[bytes_read] = '\0';
                 fputs(buf, stdout);
             }
-            background_operations--; // decrement the count of background operations
+            // decrease background_operations count, one decrease for each \n received from the child process, indicating that a background operation has completed
+            for(int i = 0; i < bytes_read; i++) {
+                if(buf[i] == '\n') {
+                    background_operations--;
+                }
+            }
         }
     }
 

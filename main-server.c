@@ -112,11 +112,38 @@ void configure_read_set(fd_set *readfds, int socket_fd) {
     FD_SET(socket_fd, readfds); // add the socket to the set
 }
 
+void handle_login(session_t *session, int clientSocket, void *payload, uint32_t payload_len) {
+    // TODO: Authentication mechanism here
+
+    // Succesful login
+    session->logged_in = 1;
+
+    char fifo_name[256];
+    snprintf(fifo_name, sizeof(fifo_name), "%s/.sessions/fifo_%d", session->root_path, getpid());
+
+    // Unlink the fifo if it already exists
+    unlink(fifo_name);
+
+    if(mkfifo(fifo_name, 0600) <0){
+        perror("mkfifo");
+        return;
+    }
+
+    // open fifo for reading and writing, I avoid in this way blocking behaviour and EOF
+    if((session->notify_fd = open(fifo_name, O_RDWR)) < 0){
+        perror("open fifo");
+        unlink(fifo_name);
+        return;
+    }
+
+
+}
+
+
 void dispatch(session_t *session, int clientSocket, uint8_t command, void *payload, uint32_t payload_len) {
     // Commands without login
     if(command == CMD_LOGIN) {
-        //handle_login(session, clientSocket, payload, payload_len);
-        // set session->logged_in = 1 if login is successful
+        handle_login(session, clientSocket, payload, payload_len);
         return;
     }
     if(command == CMD_CREATE_USER) {
@@ -152,42 +179,28 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
 
 void handle_session(int clientSocket) {
     session_t session;
+    memset(&session, 0, sizeof(session)); // initialize the session struct to zero
     session.logged_in = 0; // not logged in initially
     session.notify_fd = -1; // no notification pipe initially
 
     strncpy(session.root_path, root_directory, PATH_MAX - 1); // set the root path for the session
+    session.root_path[PATH_MAX - 1] = '\0'; // ensure null termination
 
     fd_set readfds;
-    // initiate a fifo for communication between child processes handling different users connected
-    // the fifo will be named according to child's pid, and other processes will write into it to notify
-    char fifo_name[256];
-    // it's created within the root directory of the server, and will be removed when the child process exits
-    snprintf(fifo_name, sizeof(fifo_name), "%s/fifo_%d", session.root_path, getpid());
-
-    if(mkfifo(fifo_name, 0666) < 0) {
-        perror("mkfifo");
-        close(clientSocket);
-        return;
-    }
-
-    // the above fifo is used to send requests
-    // I create another fifo to receive responses, following same naming convention, adding a _resp suffix
-    char fifo_resp_name[256];
-    snprintf(fifo_resp_name, sizeof(fifo_resp_name), "%s/fifo_%d_resp", session.root_path, getpid());
-
-    if(mkfifo(fifo_resp_name, 0666) < 0) {
-        perror("mkfifo");
-        close(clientSocket);
-        return;
-    }
-    session.notify_resp_fd = open(fifo_resp_name, O_RDONLY);
 
     for(;;){
         // configure the readfds set for select(), used to check if there is activity on the socket
         FD_ZERO(&readfds);
         FD_SET(clientSocket, &readfds);
-        FD_SET(session.notify_fd, &readfds); // add the read end of the fifo to the set
-        int max_fd = (clientSocket > session.notify_fd) ? clientSocket : session.notify_fd;
+        
+        int max_fd = clientSocket;
+
+        if(session.notify_fd >= 0) {
+            FD_SET(session.notify_fd, &readfds);
+            if(session.notify_fd > max_fd) {
+                max_fd = session.notify_fd;
+            }
+        }
 
         if(select(max_fd + 1, &readfds, NULL, NULL, NULL) < 0){
             if(errno == EINTR) continue; // if interrupted by signal, retry
@@ -212,7 +225,7 @@ void handle_session(int clientSocket) {
             free(payload); // free the payload after dispatching
         }
 
-        if(FD_ISSET(session.notify_fd, &readfds)) {
+        if(session.notify_fd >= 0 && FD_ISSET(session.notify_fd, &readfds)) {
             // handle transfer requests
             char notify_buffer[256];
             ssize_t n = read(session.notify_fd, notify_buffer, sizeof(notify_buffer));
@@ -229,6 +242,9 @@ void handle_session(int clientSocket) {
     // cleanup session resources
     if(session.notify_fd >= 0) {
         close(session.notify_fd);
+        char fifo_name[256];
+        snprintf(fifo_name, sizeof(fifo_name), "%s/.sessions/fifo_%d", session.root_path, getpid());
+        unlink(fifo_name); // remove the fifo
     }
     session.logged_in = 0; // mark as logged out
     // TODO: any other cleanup if necessary
@@ -236,6 +252,19 @@ void handle_session(int clientSocket) {
 
 
 void create_root_directory(char *root_directory) {
+    char sessions_dir[PATH_MAX];
+
+    if(mkdir(root_directory, 0755) < 0 && errno != EEXIST) {
+        perror("mkdir root_directory");
+        exit(EXIT_FAILURE);
+    }
+
+    // create .sessions directory inside the root directory
+    snprintf(sessions_dir, sizeof(sessions_dir), "%s/.sessions", root_directory);
+    if(mkdir(sessions_dir, 0755) < 0) {
+        perror("mkdir .sessions");
+        exit(EXIT_FAILURE);
+    }
 }
 
 
@@ -258,14 +287,14 @@ int main(int argc, char *argv[]) {
     char *ip_address = (argc > 2) ? argv[2] : "127.0.0.1";
     char *port_number = (argc > 3) ? argv[3] : "8080";
 
-    create_root_directory(root_directory); // TODO: implement this func to construct root path, validate it
+    create_root_directory(root_directory);
 
     if(setup_signal_handler() < 0) {
         fprintf(stderr, "Failed to setup signal handler.\n");
         exit(EXIT_FAILURE);
     }
 
-    signal(SIGPIPE, SIG_IGN);
+    signal(SIGPIPE, SIG_IGN); // ignore SIGPIPE to prevent the server from crashing when trying to write to a closed socket
 
     int s = start_server(ip_address, port_number);
 
@@ -295,9 +324,11 @@ int main(int argc, char *argv[]) {
         if(FD_ISSET(STDIN_FILENO, &readfds)) {
             // read content from stdin
             ssize_t bytes_read = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
-            if(bytes_read < 0) {
+            if(bytes_read <= 0) {
                 break; // exit the loop on error
             }
+            buffer[strcspn(buffer, "\n")] = '\0';
+            buffer[bytes_read] = '\0';
 
             buffer[bytes_read] = '\0';
             if(strcmp(buffer, "exit") == 0) {

@@ -16,8 +16,8 @@ Returns 0 on success, -1 on error.
 int send_data(int sockfd, const void *buf, size_t len){
     const char *ptr = buf; 
     while(len > 0){
-        int n = send(sockfd, ptr, len, 0);
-        if(n<0){
+        ssize_t n = send(sockfd, ptr, len, 0);
+        if(n < 0){
             if(errno == EINTR) // if interrupted by signal, retry
                 continue;
             return -1;
@@ -78,7 +78,6 @@ int build_packet(char *buf, uint8_t command, const char *payload, uint32_t paylo
 int send_packet(int sockfd, uint8_t command, const char *payload, uint32_t payload_len){
     char *packet = malloc(sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint32_t) + payload_len);
     if(packet == NULL){
-        free(packet);
         return -1;
     }
     build_packet(packet, command, payload, payload_len);
@@ -124,13 +123,12 @@ int send_ok(int fd, const char *payload, uint32_t payload_len){
 
 int send_err(int fd, int err_code, const char *payload, uint32_t payload_len){
     // prepend err_code to the payload
-    uint32_t total_len = sizeof(int) + payload_len;
-    char *buf = malloc(total_len);
-    if(buf == NULL){
-        return -1;
-    }
-    snprintf(buf, total_len, "%d %s", err_code, payload);
-    int ret = send_packet(fd, RSP_ERR, buf, total_len);
+    if (!payload) payload = "";
+    int need = snprintf(NULL, 0, "%d %s", err_code, payload);
+    char *buf = malloc(need + 1);
+    if (!buf) return -1;
+    snprintf(buf, need + 1, "%d %s", err_code, payload);
+    int ret = send_packet(fd, RSP_ERR, buf, need);       /* need, non total_len */
     free(buf);
     return ret;
 }

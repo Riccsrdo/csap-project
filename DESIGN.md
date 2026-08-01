@@ -8,6 +8,7 @@
 
 - I use select() call to detect if either the user launching the server is writing something on CL, or if the client woke up and is writing something, using a set of read file descriptors that is reset at every iteration, adding the stdin and the file descriptor of the remote client. I set up the timeout to be NULL to have infinite blocking until activity is detected.
 - As for the number of currently connected clients, I used a volatile value, due to the fact I setup a signal handler to handle SIGCHILD. The receival of a SIGCHILD indicates that a client has been disconnected, therefore we need to decrement the value, and because it's decremented within a signal handler, we use the volatile definition. Source I found online: https://stackoverflow.com/questions/246127/why-is-volatile-needed-in-c
+- for handling notifications between different children (used in transfers), I use a named pipe, the FIFO, with each child having its own FIFO in which processes can write, stored in .sessions/, and the name is determined by the PID.
 
 ## Client
 

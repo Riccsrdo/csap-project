@@ -131,31 +131,20 @@ int list(char *path, strbuf_t *sb) {
             if(lstat(fullPath, &fileStat) < 0){
                 continue; // skip this entry on error
             }
-            // construct buffer with file information
-            switch(constructFileInfo(sb, &fileStat, entry->d_name)){
-                case -ENOMEM:
-                    closedir(dir);
-                    return -ENOMEM; 
-                case -1:
-                    closedir(dir);
-                    return -1; 
-                default:
-                    break; 
+
+            int rc = constructFileInfo(sb, &fileStat, entry->d_name);
+            if(rc < 0) {
+                closedir(dir);
+                return rc; // propagate error
             }
 
         }
         closedir(dir); // close the directory
     } else {
         // if path is a file, print its information
-        switch(constructFileInfo(sb, &fileStat, path)){
-            case -ENOMEM:
-                return -ENOMEM; 
-            case -EINVAL:
-                return -EINVAL; 
-            case -1:
-                return -1; 
-            default:
-                break; 
+        int rc = constructFileInfo(sb, &fileStat, path);
+        if(rc < 0) {
+            return rc; // propagate error
         }
     }
 

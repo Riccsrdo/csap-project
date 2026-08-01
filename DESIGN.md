@@ -11,7 +11,7 @@
 
 ## Client
 
-- I use the forking mechanism for handling background operations as well, and then use a pipe to communicate with the father process about the fact an operation has been completed.
+- I use the forking mechanism for handling background operations as well, and then use a pipe to communicate with the father process about the fact an operation has been completed. Furthermore, for each background operation, I open a direct connection to the server, removing the need of having to manage packets related to two different operations.
 
 ## Commands
 

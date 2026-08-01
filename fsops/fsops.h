@@ -12,7 +12,7 @@
 #include<dirent.h> // for opening and managing directories
 #include<string.h> // for string manipulation functions
 #include<errno.h> // for error handling
-#include"../utils/utils.h"
+#include"../utils/utils.h" // da fixare con makefile, -I
 
 
 int list(char *path, strbuf_t *sb);

@@ -18,9 +18,22 @@ Responsible for:
 #include<fcntl.h> // fcntl
 #include<sys/wait.h> // waitpid
 #include<errno.h> // EINTR
+#include"network/network.h"
 
 #define MAX_CLIENT_BUFFER 1024
 #define MAX_SERVER_BUFFER 1024
+
+typedef struct {
+    char type[64];
+    int background; // 1 if background operation, 0 otherwise
+    char args[256]; // additional arguments for the command
+} cmd_t;
+
+char *ip_address; // global variable to hold the IP address
+char *port_number; // global variable to hold the port number
+
+char *username; // global variable to hold the username
+int background_operations; // global variable to hold the number of background operations
 
 // Handle SIGCHLD to reap child processes and avoid zombies
 void handle_signal_child(int sig) {
@@ -84,13 +97,87 @@ int start_client(char *ip_address, char *port_number){
 }
 
 // takes the readfds set, the socket_fd and the pipe of child processes running commands in background
-void configure_read_set(fd_set *readfds, int socket_fd, int pipe_fd) {
+int configure_read_set(fd_set *readfds, int socket_fd, int pipe_fd) {
     FD_ZERO(readfds);
     FD_SET(STDIN_FILENO, readfds); // add stdin to the set
     FD_SET(socket_fd, readfds); // add the socket to the set
     if(pipe_fd >= 0) {
         FD_SET(pipe_fd, readfds); // add the pipe to the set if valid
     }
+
+    // look for the maximum file descriptor for select()
+    int max_fd = (socket_fd > STDIN_FILENO) ? socket_fd : STDIN_FILENO;
+    if(pipe_fd >= 0 && pipe_fd > max_fd) {
+        max_fd = pipe_fd;
+    }
+
+    return max_fd;
+    
+}
+
+// Waits for a response from the server, handling asynchronous notifications, printing them to stdout
+int wait_response(int fd){
+    for(;;){
+        uint8_t command;
+        char *payload = NULL;
+        uint32_t payload_len;
+
+        if(recv_packet(fd, (char **)&payload, &command, &payload_len) < 0) {
+            fprintf(stderr, "Error receiving packet from server\n");
+            free(payload);
+            return -1;
+        }
+
+        if(command == RSP_NOTIFY){
+            printf("%s \n", (char *)payload);
+            free(payload);
+            continue;
+        }
+
+        if(command == RSP_ERR){
+            fprintf(stderr, "Server error: %s\n", (char *)payload);
+            free(payload);
+            return -1;
+        }
+
+        if(command == RSP_OK){
+            printf("Server: %s\n", (char *)payload);
+            free(payload);
+            return 0;
+        }
+    }
+
+    // should not reach here
+    return -1;
+}
+
+void spawn_background(cmd_t *command, int* pipe_fd, int socket_fd) {
+    fflush(NULL);
+    pid_t pid = fork();
+    if(pid == 0){
+        close(pipe_fd[0]); // close the read end of the pipe in the child
+        close(socket_fd); // close the socket in the child, as it will not be used
+
+        // open a connection to the server for the background operation
+        int bg_socket_fd = start_client(ip_address, port_number);
+        // need to authenticate the background operation with the server, using the username
+        send_packet(bg_socket_fd, CMD_LOGIN, username, strlen(username));
+        if(wait_response(bg_socket_fd) < 0) {
+            fputs("Background operation failed to authenticate with server.\n", stdout);
+            close(bg_socket_fd);
+            _exit(EXIT_FAILURE);
+        }
+
+        // upload content/download content
+        // function()
+
+        char *msg = "Background operation completed.\n";
+        write(pipe_fd[1], msg, strlen(msg)); // write to the pipe to notify the parent
+        close(bg_socket_fd);
+        _exit(EXIT_SUCCESS);
+    } else if (pid < 0) {
+        perror("fork");
+    } 
 }
 
 // default <IP> is 127.0.0.1, default <port> is 8080
@@ -106,30 +193,33 @@ int main(int argc, char *argv[]) {
     // to avoid termination of the client when a child process tries to write to a closed socket
     signal(SIGPIPE, SIG_IGN);
 
-    char *ip_address = (argc > 1) ? argv[1] : "127.0.0.1";
-    char *port_number = (argc > 2) ? argv[2] : "8080";
+    ip_address = (argc > 1) ? argv[1] : "127.0.0.1";
+    port_number = (argc > 2) ? argv[2] : "8080";
 
     // Configure the readfds set for select(), used to check if there is activity on stdin, the socket, or the pipe
     fd_set readfds;
 
-    int s = start_client(ip_address, port_number); // start the client and get the socket descriptor
+    int socket_fd = start_client(ip_address, port_number); // start the client and get the socket descriptor
 
     // create a pipe for communication with child processes, which handles background operations
     int pipe_fd[2];
     if(pipe(pipe_fd) < 0) {
         perror("pipe");
-        close(s);
+        close(socket_fd);
         exit(EXIT_FAILURE);
     }
 
     int select_result; // result of the select() call in the main loop
+    int max_fd;
+
+    background_operations = 0;
 
     while(1){
         // reset readfds before each select call
-        configure_read_set(&readfds, s, pipe_fd[0]);
+        max_fd = configure_read_set(&readfds, socket_fd, pipe_fd[0]);
 
         // select() blocks, waiting for activity either on stdin, the socket, or the pipe
-        select_result = select(FD_SETSIZE, &readfds, NULL, NULL, NULL);
+        select_result = select(max_fd + 1, &readfds, NULL, NULL, NULL);
 
         if (select_result < 0) {
             if (errno == EINTR) continue;
@@ -164,12 +254,61 @@ int main(int argc, char *argv[]) {
             }
                 */
 
+            char line[MAX_CLIENT_BUFFER];
+            ssize_t bytes_read = read(STDIN_FILENO, line, sizeof(line) - 1);
+            if(bytes_read < 0) {
+                break; // exit the loop on error
+            }
+
+            line[bytes_read] = '\0';
+
+            cmd_t command;
+
+            /*
+            if(parse_command(line, &command) < 0) {
+                fputs("Invalid command\n", stdout);
+                continue;
+            }
+            */
+
+            if(strcmp(command.type, "exit") == 0) {
+                if(background_operations > 0) {
+                    fputs("There are background operations running. Please wait for them to finish.\n", stdout);
+                    continue;
+                }
+                break;
+            }
+
+            if(command.background){
+                background_operations++; // increment the count of background operations
+                spawn_background(&command, pipe_fd, socket_fd);
+                continue;
+            }
+
+            send_packet(socket_fd, command.type[0], command.args, strlen(command.args)); // send the command to the server
+
+            wait_response(socket_fd); // wait for the server response, handling asynchronous notifications
+
+            continue;
         }
 
         // check if there is activity on the socket (server response)
-        if(FD_ISSET(s, &readfds)) {
-            // read the server response and print it to stdout
-            // TODO: implement a chunking system to handle large responses, if necessary
+        if(FD_ISSET(socket_fd, &readfds)) {
+            // server has sent something, without client first requesting somethign
+            uint8_t command;
+            char *payload = NULL;
+            uint32_t payload_len;
+
+            if(recv_packet(socket_fd, (char **)&payload, &command, &payload_len) < 0) {
+                fputs("Server closed. \n", stdout);
+                free(payload);
+                break; // exit the loop on error
+            }
+            if(command == RSP_NOTIFY){
+                printf("%s \n", (char *)payload);
+                free(payload);
+                continue;
+            }
         }
 
 
@@ -177,10 +316,18 @@ int main(int argc, char *argv[]) {
         if(FD_ISSET(pipe_fd[0], &readfds)) {
             // read the output from the child process and print it to stdout
             // TODO: implement pipe reading logic
+
+            char buf[512];
+            ssize_t bytes_read = read(pipe_fd[0], buf, sizeof(buf) -1);
+            if(bytes_read > 0) {
+                buf[bytes_read] = '\0';
+                fputs(buf, stdout);
+            }
+            background_operations--; // decrement the count of background operations
         }
     }
 
 
-    close(s);
+    close(socket_fd); // close the socket before exiting
     return 0;
 }

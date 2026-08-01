@@ -20,8 +20,14 @@ Responsible for:
 #include<fcntl.h> // fcntl
 #include<sys/wait.h> // waitpid
 #include<errno.h>
+#include"utils/utils.h"
+#include"network/network.h"
+#include<sys/types.h>
+#include<sys/stat.h>
 
 #define MAX_CLIENT_BUFFER 1024
+
+char *root_directory; // global variable to hold the root directory path
 
 void handle_signals(int sig) {
     // wait for all dead processes (SIGCHLD) without blocking
@@ -106,9 +112,131 @@ void configure_read_set(fd_set *readfds, int socket_fd) {
     FD_SET(socket_fd, readfds); // add the socket to the set
 }
 
-void handle_session(int clientSocket) {
+void dispatch(session_t *session, int clientSocket, uint8_t command, void *payload, uint32_t payload_len) {
+    // Commands without login
+    if(command == CMD_LOGIN) {
+        //handle_login(session, clientSocket, payload, payload_len);
+        // set session->logged_in = 1 if login is successful
+        return;
+    }
+    if(command == CMD_CREATE_USER) {
+        //handle_create_user(session, clientSocket, payload, payload_len);
+        return;
+    }
+
+    // Commands with login
+
+    // first check if user is logged in, if not send an error response to the client
+    if(!session->logged_in) {
+        // send error response to client indicating that login is required
+        const char *error_msg = "Login required";
+        send_err(clientSocket, EACCES, error_msg, strlen(error_msg));
+        return;
+    }
+
+    switch(command){
+        case(CMD_LIST): {
+            break;
+        }
+        default: {
+            // send error response to client indicating that the command is not recognized
+            const char *error_msg = "Command not recognized";
+            send_err(clientSocket, EINVAL, error_msg, strlen(error_msg));
+        }
+    }
+
+
+
 }
 
+
+void handle_session(int clientSocket) {
+    session_t session;
+    session.logged_in = 0; // not logged in initially
+    session.notify_fd = -1; // no notification pipe initially
+
+    strncpy(session.root_path, root_directory, PATH_MAX - 1); // set the root path for the session
+
+    fd_set readfds;
+    // initiate a fifo for communication between child processes handling different users connected
+    // the fifo will be named according to child's pid, and other processes will write into it to notify
+    char fifo_name[256];
+    // it's created within the root directory of the server, and will be removed when the child process exits
+    snprintf(fifo_name, sizeof(fifo_name), "%s/fifo_%d", session.root_path, getpid());
+
+    if(mkfifo(fifo_name, 0666) < 0) {
+        perror("mkfifo");
+        close(clientSocket);
+        return;
+    }
+
+    // the above fifo is used to send requests
+    // I create another fifo to receive responses, following same naming convention, adding a _resp suffix
+    char fifo_resp_name[256];
+    snprintf(fifo_resp_name, sizeof(fifo_resp_name), "%s/fifo_%d_resp", session.root_path, getpid());
+
+    if(mkfifo(fifo_resp_name, 0666) < 0) {
+        perror("mkfifo");
+        close(clientSocket);
+        return;
+    }
+    session.notify_resp_fd = open(fifo_resp_name, O_RDONLY);
+
+    for(;;){
+        // configure the readfds set for select(), used to check if there is activity on the socket
+        FD_ZERO(&readfds);
+        FD_SET(clientSocket, &readfds);
+        FD_SET(session.notify_fd, &readfds); // add the read end of the fifo to the set
+        int max_fd = (clientSocket > session.notify_fd) ? clientSocket : session.notify_fd;
+
+        if(select(max_fd + 1, &readfds, NULL, NULL, NULL) < 0){
+            if(errno == EINTR) continue; // if interrupted by signal, retry
+            perror("select");
+            break;
+        }
+
+        if(FD_ISSET(clientSocket, &readfds)) {
+            // save command characteristics
+            uint8_t command;
+            void *payload = NULL;
+            uint32_t payload_len;
+
+            // receive packet
+            if(recv_packet(clientSocket, (char**)&payload, &command, &payload_len) < 0){
+                // error receiving packet, close the session
+                free(payload);
+                break;
+            }
+
+            dispatch(&session, clientSocket, command, payload, payload_len);
+            free(payload); // free the payload after dispatching
+        }
+
+        if(FD_ISSET(session.notify_fd, &readfds)) {
+            // handle transfer requests
+            char notify_buffer[256];
+            ssize_t n = read(session.notify_fd, notify_buffer, sizeof(notify_buffer));
+            if(n < 0) {
+                perror("read from pipe");
+                break;
+            }
+            // process the notification
+
+        }
+
+    }
+
+    // cleanup session resources
+    if(session.notify_fd >= 0) {
+        close(session.notify_fd);
+    }
+    session.logged_in = 0; // mark as logged out
+    // TODO: any other cleanup if necessary
+}
+
+
+void create_root_directory(char *root_directory) {
+}
 
 
 /*
@@ -126,11 +254,11 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    char *root_directory = argv[1];
+    root_directory = argv[1];
     char *ip_address = (argc > 2) ? argv[2] : "127.0.0.1";
     char *port_number = (argc > 3) ? argv[3] : "8080";
 
-    // handle_root_directory(root_directory); // TODO: implement this func to construct root path, validate it
+    create_root_directory(root_directory); // TODO: implement this func to construct root path, validate it
 
     if(setup_signal_handler() < 0) {
         fprintf(stderr, "Failed to setup signal handler.\n");
@@ -152,13 +280,6 @@ int main(int argc, char *argv[]) {
     int select_result; // result of select()
     char buffer[MAX_CLIENT_BUFFER]; // buffer for reading data from clients or stdin
 
-    /*
-    loop:
-    cfd = accept(listenfd)          
-    pid = fork()
-    if figlio:  close(listenfd); handle_client_session(cfd); _exit()
-    if padre:   close(cfd), torna ad accept()
-    */
     while(1){
         // clean file descriptor set
         configure_read_set(&readfds, s);
@@ -167,23 +288,18 @@ int main(int argc, char *argv[]) {
         select_result = select(max_fd + 1, &readfds, NULL, NULL, NULL);
         if (select_result < 0) {
             if (errno == EINTR) continue;
+            perror("select"); break;
         }
 
         // check first if there is activity on stdin (server operator input)
         if(FD_ISSET(STDIN_FILENO, &readfds)) {
-            if(fgets(buffer, sizeof(buffer), stdin) == NULL) {
-                // error or EOF
-                if(feof(stdin)) {
-                    printf("EOF on stdin, exiting.\n");
-                    break; // exit the loop on EOF
-                } else {
-                    perror("fgets");
-                    continue; // continue to next iteration on error
-                }
+            // read content from stdin
+            ssize_t bytes_read = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
+            if(bytes_read < 0) {
+                break; // exit the loop on error
             }
 
-            // handle command
-            buffer[strcspn(buffer, "\n")] = 0; // remove newline character
+            buffer[bytes_read] = '\0';
             if(strcmp(buffer, "exit") == 0) {
                 printf("Exiting server.\n");
                 break; // exit the loop on "exit" command
@@ -202,14 +318,8 @@ int main(int argc, char *argv[]) {
             clientSocket = accept(s, (struct sockaddr*)&clientAddress, &clientAddressLen);
 
             if(clientSocket < 0) {
-                perror("accept");
-                continue; // continue to next iteration on error
-            }
-
-            if(clientSocket < 0) {
-                perror("accept");
-                // TODO: appropriate error handling, maybe continue or exit
-                continue;
+                if(errno == EINTR) continue; // if interrupted by signal, retry
+                perror("accept"); continue;
             }
 
             // fork a new process to handle the client
@@ -225,6 +335,8 @@ int main(int argc, char *argv[]) {
                 // handle the client session and the exit
                 handle_session(clientSocket);
 
+                close(clientSocket); // close the connected socket in the child
+
                 _exit(0); // after client session is handled, exit the child process
             } else { // parent process
                 close(clientSocket); // parent does not need the connected socket
@@ -234,7 +346,11 @@ int main(int argc, char *argv[]) {
 
         
     }
-
+    // kill all child processes before exiting, as if we're out the loop the server is shutting / there's been an error
+    
+    signal(SIGTERM, SIG_IGN); // ignore SIGTERM in the parent to avoid killing myself
+    kill(0, SIGTERM); // send SIGTERM, 0 indicates all processes in the same process group
+    
     close(s);
 
     return 0;

@@ -9,22 +9,25 @@ Responsible for:
 
 #include"utils.h"
 
-void sb_init(strbuf_t *sb) {
+int sb_init(strbuf_t *sb) {
     sb->cap = 1024; // initial capacity
     sb->len = 0; // initial length of the string
     sb->data = malloc(sb->cap); // allocate memory for the string
     if (sb->data) {
         sb->data[0] = '\0';
     } else {
-        return; // ENOMEM
+        return -ENOMEM; // ENOMEM
     }
+    return 0;
 }
 
 int sb_append(strbuf_t *sb, const char *s, size_t n) {
     if (!sb || !s) return -1; // if the strbuf_t pointer or the string pointer is NULL, return error
 
     if (!sb->data) { // if the buffer is not initialized, initialize it
-        sb_init(sb);
+        int i;
+        i = sb_init(sb);
+        if(i < 0) return -1; // ENOMEM
         if (!sb->data) return -1; // ENOMEM
     }
     

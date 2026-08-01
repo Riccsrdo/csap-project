@@ -117,3 +117,20 @@ int recv_packet(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len){
     }
     return 0;
 }
+
+int send_ok(int fd, const char *payload, uint32_t payload_len){
+    return send_packet(fd, RSP_OK, payload, payload_len);
+}
+
+int send_err(int fd, int err_code, const char *payload, uint32_t payload_len){
+    // prepend err_code to the payload
+    uint32_t total_len = sizeof(int) + payload_len;
+    char *buf = malloc(total_len);
+    if(buf == NULL){
+        return -1;
+    }
+    snprintf(buf, total_len, "%d %s", err_code, payload);
+    int ret = send_packet(fd, RSP_ERR, buf, total_len);
+    free(buf);
+    return ret;
+}

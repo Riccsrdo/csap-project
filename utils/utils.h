@@ -4,6 +4,20 @@
 
 #include<string.h>
 #include<stdlib.h>
+#include<sys/types.h>
+#include<limits.h>
+#include<errno.h>
+
+// This struct is used to handle user session, each child will have its own
+typedef struct {
+    int logged_in; // 1 if logged, 0 otherwise
+    char user[64]; // username of logged-in user
+    uid_t uid; // saved user id of the logged-in user, used in the server
+    char home_path[PATH_MAX]; // home directory of the logged-in user
+    char root_path[PATH_MAX]; // root of the server
+    int notify_fd; // file desc. for a pipe, used for handling transfer_requests between sessions
+    int notify_resp_fd; // file desc. for a pipe, used for handling transfer_responses between sessions
+} session_t;
 
 typedef struct {
     char *data; // pointer to the string data
@@ -11,7 +25,7 @@ typedef struct {
     size_t cap; // capacity of the buffer (allocated size)
 } strbuf_t; 
 
-void sb_init(strbuf_t *sb);
+int sb_init(strbuf_t *sb);
 
 // puts n bytes in the buf
 int sb_append(strbuf_t *sb, const char *s, size_t n);

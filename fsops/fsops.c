@@ -59,7 +59,7 @@ int constructFileInfo(strbuf_t *sb, struct stat *fileStat, const char *filename)
                            time_buf,
                            filename);
 
-    if (written < 0 || written >= sizeof(line)) {
+    if (written < 0 || written >= (int) sizeof(line)) {
         // error
         return -1;
     }
@@ -69,7 +69,7 @@ int constructFileInfo(strbuf_t *sb, struct stat *fileStat, const char *filename)
         return -ENOMEM; // memory allocation error
     }
 
-    
+    return 0; // success
 }
 
 
@@ -90,9 +90,9 @@ int list(char *path, strbuf_t *sb) {
     }
 
     if(sb->data == NULL) {
-        sb_init(sb);
-        if(sb->data == NULL) {
-            return -ENOMEM; // memory allocation error[cite: 1]
+        int i = sb_init(sb);
+        if(i < 0) {
+            return -ENOMEM; // memory allocation error
         }
     }
 

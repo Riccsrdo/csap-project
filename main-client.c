@@ -19,15 +19,11 @@ Responsible for:
 #include<sys/wait.h> // waitpid
 #include<errno.h> // EINTR
 #include"network/network.h"
+#include"protocol/protocol.h"
 
 #define MAX_CLIENT_BUFFER 1024
 #define MAX_SERVER_BUFFER 1024
 
-typedef struct {
-    char type[64];
-    int background; // 1 if background operation, 0 otherwise
-    char args[256]; // additional arguments for the command
-} cmd_t;
 
 char *ip_address; // global variable to hold the IP address
 char *port_number; // global variable to hold the port number
@@ -128,6 +124,21 @@ int wait_response(int fd){
             return -1;
         }
         // print, based on error code/success code, related message to stdout
+        if(command == RSP_NOTIFY){
+            printf("%s \n", (char *)payload);
+            free(payload);
+            continue; // continue to wait for the actual response
+        } else if(command == RSP_OK) {
+            printf("Operation successful: %s \n", (char *)payload);
+            free(payload);
+            return 0; // success
+        } else if(command == RSP_ERR) {
+            int code; char msg[256];
+            if (sscanf(payload, "%d %255[^\n]", &code, msg) == 2)
+                fprintf(stderr, "Error: %s (%s)\n", msg, strerror(code));
+            free(payload);
+            return -1; // error
+        }
     }
 
     // should not reach here
@@ -208,12 +219,7 @@ int main(int argc, char *argv[]) {
             if (errno == EINTR) continue;
             perror("select"); break;
         }
-
-        if(select_result < 0) {
-            perror("select");
-            break; // exit the loop on error
-        }
-
+        
         // check if there is activity on stdin (user input)
         if(FD_ISSET(STDIN_FILENO, &readfds)) {
             
@@ -239,11 +245,12 @@ int main(int argc, char *argv[]) {
 
             char line[MAX_CLIENT_BUFFER];
             ssize_t bytes_read = read(STDIN_FILENO, line, sizeof(line) - 1);
-            if(bytes_read < 0) {
+            if(bytes_read <= 0) {
                 break; // exit the loop on error
             }
 
             line[bytes_read] = '\0';
+            line[strcspn(line, "\n")] = '\0'; // remove newline character
 
             cmd_t command;
 
@@ -254,7 +261,7 @@ int main(int argc, char *argv[]) {
             }
             */
 
-            if(strcmp(command.type, "exit") == 0) {
+            if(command.code == CMD_EXIT) {
                 if(background_operations > 0) {
                     fputs("There are background operations running. Please wait for them to finish.\n", stdout);
                     continue;
@@ -262,13 +269,13 @@ int main(int argc, char *argv[]) {
                 break;
             }
 
-            if(command.background){
+            if(command.is_background) {
                 background_operations++; // increment the count of background operations
                 spawn_background(&command, pipe_fd, socket_fd);
                 continue;
             }
 
-            send_packet(socket_fd, command.type[0], command.args, strlen(command.args)); // send the command to the server
+            send_packet(socket_fd, command.code, command.buf, strlen(command.buf));
 
             wait_response(socket_fd); // wait for the server response, handling asynchronous notifications
 

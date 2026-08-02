@@ -4,4 +4,93 @@ Responsible for:
 - Canonicalization of paths;
 - Sandbox validation;
 */
+#include"paths.h"
 
+// identify if user's operation is within the allowed scope
+// it should allow operations only within user's home directory, with the exception
+// of list, which allows operations even in the root directory
+// for all operations, root represent the home directory of the user
+// for list, it's the actual root of the server, which is the root of the filesystem
+int check_user_scope(const char *path, const char *root) {
+    char validated_path[PATH_MAX];
+    if (validate_path(path, root, validated_path) != 0) {
+        return -1; // path is outside the root directory
+    }
+    return 0; // path is valid and within the root directory
+
+}
+
+// validate the path and check if it is within the provided root directory
+// 
+int validate_path(const char *path, const char *root, char *validated_path) {
+
+    if(validated_path == NULL || path == NULL || root == NULL) {
+        return -1; // invalid input
+    }
+
+    validated_path[0] = '\0';
+
+    size_t root_len = strlen(root);
+
+    // first try to validate assuming file already exists
+    if(realpath(path, validated_path) != NULL) {
+        if(strncmp(validated_path, root, root_len) != 0 || (validated_path[root_len] != '/' && validated_path[root_len] != '\0')) {
+            return -1; // path is outside the root directory
+        }
+        return 0; // path is valid and within the root directory
+    }
+
+    // check if the file does not exist, but parent directory does
+    if(errno != ENOENT) {
+        return -1; 
+    }
+
+    // the file might not exist, so we check if the parent directory is valid (useful for create operations)
+    char *path_copy = strdup(path);
+    char *path_copy2 = strdup(path);
+
+    if(path_copy == NULL || path_copy2 == NULL) {
+        if(path_copy) {
+            free(path_copy);
+        }
+        if(path_copy2) {
+            free(path_copy2);
+        }
+        return -1; // memory allocation failed
+    }
+
+    char *parent_dir = dirname(path_copy);
+    char *base_name = basename(path_copy2);
+
+    char resolved_parent[PATH_MAX];
+    if(realpath(parent_dir, resolved_parent) == NULL) {
+        free(path_copy);
+        free(path_copy2);
+        return -1; // parent directory does not exist or cannot be resolved
+    }
+
+    // if we're here, resolved_parent exists, so we validate it against the root
+    if(strncmp(resolved_parent, root, root_len) != 0 || (resolved_parent[root_len] != '/' && resolved_parent[root_len] != '\0')) {
+        free(path_copy);
+        free(path_copy2);
+        return -1; // parent directory is outside the root directory
+    }
+
+
+    // reconstruct the full path
+    int result = snprintf(validated_path, PATH_MAX, "%s%s%s",
+        resolved_parent,
+        (strcmp(resolved_parent, "/") == 0) ? "" : "/",
+        base_name
+    );
+
+    if(result < 0 || result >= PATH_MAX) {
+        free(path_copy);
+        free(path_copy2);
+        return -1; // snprintf error or path too long
+    }
+
+    free(path_copy);
+    free(path_copy2);
+    return 0; // path is valid and within the root directory
+}

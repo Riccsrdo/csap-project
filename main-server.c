@@ -55,10 +55,6 @@ Start server, listen on localhost:8080, return the socket descriptor.
 */
 
 int start_server(char *ip_address, char *port_number){
-
-    // create TCP socket with SO_LINGER option set to 1, which means that when the socket is closed, 
-    // the system will try to send any remaining data for a short period of time before forcefully 
-    // closing the connection.
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if(sockfd < 0) {
         perror("socket");
@@ -115,9 +111,6 @@ void configure_read_set(fd_set *readfds, int socket_fd) {
 void handle_login(session_t *session, int clientSocket, void *payload, uint32_t payload_len) {
     // TODO: Authentication mechanism here
 
-    // Succesful login
-    session->logged_in = 1;
-
     char fifo_name[256];
     snprintf(fifo_name, sizeof(fifo_name), "%s/.sessions/fifo_%d", session->root_path, getpid());
 
@@ -125,13 +118,19 @@ void handle_login(session_t *session, int clientSocket, void *payload, uint32_t 
     unlink(fifo_name);
 
     if(mkfifo(fifo_name, 0600) <0){
+        char *msg = "Failed to create FIFO for notifications";
+        send_err(clientSocket, errno, msg, strlen(msg));
         perror("mkfifo");
         return;
     }
 
+    session->logged_in = 1;
+
     // open fifo for reading and writing, I avoid in this way blocking behaviour and EOF
     if((session->notify_fd = open(fifo_name, O_RDWR)) < 0){
         perror("open fifo");
+        char *msg = "Failed to open FIFO for notifications";
+        send_err(clientSocket, errno, msg, strlen(msg));
         unlink(fifo_name);
         return;
     }
@@ -327,10 +326,8 @@ int main(int argc, char *argv[]) {
             if(bytes_read <= 0) {
                 break; // exit the loop on error
             }
+            buffer[bytes_read] = '\0';
             buffer[strcspn(buffer, "\n")] = '\0';
-            buffer[bytes_read] = '\0';
-
-            buffer[bytes_read] = '\0';
             if(strcmp(buffer, "exit") == 0) {
                 printf("Exiting server.\n");
                 break; // exit the loop on "exit" command

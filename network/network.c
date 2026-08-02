@@ -38,7 +38,7 @@ int receive_data(int sockfd, void *buf, size_t len){
     char *ptr = buf;
 
     while(len > 0){
-        int n = recv(sockfd, ptr, len, 0);
+        ssize_t n = recv(sockfd, ptr, len, 0);
         if (n == 0) { // EOF, connection closed by the peer
             return -1;
         }

@@ -12,6 +12,4 @@
 
 int validate_path(const char *path, const char *root, char *validated_path);
 
-int check_user_scope(const char *path, const char *root);
-
 #endif

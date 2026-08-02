@@ -252,32 +252,7 @@ int main(int argc, char *argv[]) {
             line[bytes_read] = '\0';
             line[strcspn(line, "\n")] = '\0'; // remove newline character
 
-            cmd_t command;
-
-            /*
-            if(parse_command(line, &command) < 0) {
-                fputs("Invalid command\n", stdout);
-                continue;
-            }
-            */
-
-            if(command.code == CMD_EXIT) {
-                if(background_operations > 0) {
-                    fputs("There are background operations running. Please wait for them to finish.\n", stdout);
-                    continue;
-                }
-                break;
-            }
-
-            if(command.is_background) {
-                background_operations++; // increment the count of background operations
-                spawn_background(&command, pipe_fd, socket_fd);
-                continue;
-            }
-
-            send_packet(socket_fd, command.code, command.buf, strlen(command.buf));
-
-            wait_response(socket_fd); // wait for the server response, handling asynchronous notifications
+            // implement commands parsing and handling mechanism
 
             continue;
         }

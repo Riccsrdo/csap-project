@@ -6,19 +6,11 @@ Responsible for:
 */
 #include"paths.h"
 
-// identify if user's operation is within the allowed scope
-// it should allow operations only within user's home directory, with the exception
-// of list, which allows operations even in the root directory
-// for all operations, root represent the home directory of the user
-// for list, it's the actual root of the server, which is the root of the filesystem
-int check_user_scope(const char *path, const char *root) {
-    char validated_path[PATH_MAX];
-    if (validate_path(path, root, validated_path) != 0) {
-        return -1; // path is outside the root directory
-    }
-    return 0; // path is valid and within the root directory
+/* To validate the scope of user operations,
+call validate_path and look for the result
 
-}
+if != 0, the operation is outside the allowed scope, and should be rejected
+*/
 
 // validate the path and check if it is within the provided root directory
 // 
@@ -42,6 +34,8 @@ int validate_path(const char *path, const char *root, char *validated_path) {
 
     // check if the file does not exist, but parent directory does
     if(errno != ENOENT) {
+        // reset validated_path to empty string, avoiding any potential misuse of uninitialized data with errors
+        validated_path[0] = '\0';
         return -1; 
     }
 
@@ -56,6 +50,7 @@ int validate_path(const char *path, const char *root, char *validated_path) {
         if(path_copy2) {
             free(path_copy2);
         }
+        validated_path[0] = '\0';
         return -1; // memory allocation failed
     }
 
@@ -66,6 +61,7 @@ int validate_path(const char *path, const char *root, char *validated_path) {
     if(realpath(parent_dir, resolved_parent) == NULL) {
         free(path_copy);
         free(path_copy2);
+        validated_path[0] = '\0';
         return -1; // parent directory does not exist or cannot be resolved
     }
 
@@ -73,6 +69,7 @@ int validate_path(const char *path, const char *root, char *validated_path) {
     if(strncmp(resolved_parent, root, root_len) != 0 || (resolved_parent[root_len] != '/' && resolved_parent[root_len] != '\0')) {
         free(path_copy);
         free(path_copy2);
+        validated_path[0] = '\0';
         return -1; // parent directory is outside the root directory
     }
 
@@ -87,6 +84,7 @@ int validate_path(const char *path, const char *root, char *validated_path) {
     if(result < 0 || result >= PATH_MAX) {
         free(path_copy);
         free(path_copy2);
+        validated_path[0] = '\0';
         return -1; // snprintf error or path too long
     }
 

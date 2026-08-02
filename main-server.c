@@ -24,10 +24,13 @@ Responsible for:
 #include"network/network.h"
 #include<sys/types.h>
 #include<sys/stat.h>
+#include<limits.h>
 
 #define MAX_CLIENT_BUFFER 1024
 
 char *root_directory; // global variable to hold the root directory path
+
+gid_t server_gid; // global variable to hold the server's group ID
 
 void handle_signals(int sig) {
     // wait for all dead processes (SIGCHLD) without blocking
@@ -258,9 +261,25 @@ void create_root_directory(char *root_directory) {
         exit(EXIT_FAILURE);
     }
 
+    char resolved_root[PATH_MAX];
+    if(realpath(root_directory, resolved_root) == NULL) {
+        perror("realpath");
+        exit(EXIT_FAILURE);
+    }
+
+    size_t root_len = strlen(resolved_root);
+    while(root_len > 0 && resolved_root[root_len - 1] == '/') {
+        resolved_root[root_len - 1] = '\0';
+        root_len--;
+    } // remove trailing slashes for the correct funcionality of validate_path
+
+    // save resolved root path back to the global variable
+    strncpy(root_directory, resolved_root, PATH_MAX - 1);
+    root_directory[PATH_MAX - 1] = '\0'; // ensure null termination
+
     // create .sessions directory inside the root directory
     snprintf(sessions_dir, sizeof(sessions_dir), "%s/.sessions", root_directory);
-    if(mkdir(sessions_dir, 0755) < 0) {
+    if(mkdir(sessions_dir, 0755) < 0 && errno != EEXIST) {
         perror("mkdir .sessions");
         exit(EXIT_FAILURE);
     }
@@ -274,8 +293,12 @@ takes three arguments:
 - root directory for the server to serve files from;
 - IP address to bind to, default is 127.0.0.1;
 - port number to bind to, default is 8080.
+
+server is started with sudo, so I can create users through adduser and add them in the servers' group
 */
 int main(int argc, char *argv[]) {
+
+    umask(0); // set umask to 0 to allow full permissions for created files and directories
 
     if(argc < 2) {
         fprintf(stderr, "Usage: %s <root_directory> [<IP>] [<port>]\n", argv[0]);
@@ -377,7 +400,7 @@ int main(int argc, char *argv[]) {
     // kill all child processes before exiting, as if we're out the loop the server is shutting / there's been an error
     
     signal(SIGTERM, SIG_IGN); // ignore SIGTERM in the parent to avoid killing myself
-    kill(0, SIGTERM); // send SIGTERM, 0 indicates all processes in the same process group
+    //kill(0, SIGTERM); // send SIGTERM, 0 indicates all processes in the same process group
     
     close(s);
 

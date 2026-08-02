@@ -4,6 +4,8 @@
 
 #include <stdint.h>
 #include<limits.h>
+#include<stdlib.h>
+#include<stdio.h>
 #include"../network/network.h" // da fixare con makefile, -I
 
 #define MAX_ARGS 8
@@ -15,20 +17,12 @@ typedef struct{
     long offset; // offset for read/write operations, -1 if not applicable
     int argc; // number of arguments
     char *argv[MAX_ARGS]; // array of argument strings
-    char buf[2 * PATH_MAX]; // buffer for additional data
+    char buf[2 * PATH_MAX]; // buffer for data
+    char buf2[2 * PATH_MAX]; // additional buffer for data, if needed
 } cmd_t; // reminder for me: copy cmd_t using pointer
 
 
 
 int parse_command(const char *line, cmd_t *command);
 
-// useful to associate command names with their codes, for parsing and serialization
-static const struct 
-{ 
-    const char *name; 
-    uint8_t code; 
-} CMDS[] = {
-    {"login", CMD_LOGIN}, {"list", CMD_LIST}, {"cd", CMD_CD}, {"read", CMD_READ},
-    {"exit", CMD_EXIT}
-};
 #endif

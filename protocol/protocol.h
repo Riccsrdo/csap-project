@@ -6,7 +6,8 @@
 #include<limits.h>
 #include<stdlib.h>
 #include<stdio.h>
-#include"../network/network.h" // da fixare con makefile, -I
+#include"../network/network.h" // fix with makefile
+//#include"network.h"
 
 #define MAX_ARGS 8
 

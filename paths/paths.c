@@ -22,7 +22,16 @@ int validate_path(const char *path, const char *root, char *validated_path) {
 
     validated_path[0] = '\0';
 
-    size_t root_len = strlen(root);
+    char nroot[PATH_MAX];
+    strncpy(nroot, root, PATH_MAX - 1);
+    nroot[PATH_MAX - 1] = '\0'; 
+
+    size_t root_len = strlen(nroot);
+
+    while(root_len > 0 && nroot[root_len - 1] == '/') {
+        nroot[root_len - 1] = '\0';
+        root_len--;
+    } // remove trailing slashes for the correct funcionality of validate_path
 
     // first try to validate assuming file already exists
     if(realpath(path, validated_path) != NULL) {

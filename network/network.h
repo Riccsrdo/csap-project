@@ -41,6 +41,6 @@ int recv_packet(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len);
 // Used by the server to notify about the status of a command, with an optional payload (e.g. error message)
 
 int send_ok(int fd, const char *payload, uint32_t payload_len);
-int send_err(int fd, int err_code, const char *payload, uint32_t payload_len);
+int send_err(int fd, int err_code, const char *payload);
 
 #endif

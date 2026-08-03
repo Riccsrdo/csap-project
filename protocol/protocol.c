@@ -27,6 +27,11 @@ int parse_command(const char *line, cmd_t *command) {
     }
 
     command->offset = -1;
+    command->is_background = 0;
+    command->is_dir = 0;
+    command->argc = 0;
+    command->buf[0] = '\0';
+    command->buf2[0] = '\0';
 
     char *copy = strdup(line);
     if(copy == NULL){
@@ -40,7 +45,10 @@ int parse_command(const char *line, cmd_t *command) {
         return -1; // empty command
     }
 
-    if(strcmp(token, "login") == 0) {
+    // assign, given string, the corresponding command code
+    if(strcmp(token, "create_user") == 0) {
+        command->code = CMD_CREATE_USER;
+    } else if(strcmp(token, "login") == 0) {
         command->code = CMD_LOGIN;
     } else if(strcmp(token, "list") == 0) {
         command->code = CMD_LIST;
@@ -49,11 +57,32 @@ int parse_command(const char *line, cmd_t *command) {
     } else if(strcmp(token, "read") == 0) {
         command->code = CMD_READ;
     } else if(strcmp(token, "exit") == 0) {
-        command->code = CMD_EXIT;
+        command->code = CMD_EXIT;   
+    } else if(strcmp(token, "create") == 0) {
+        command->code = CMD_CREATE;
+    } else if(strcmp(token, "chmod") == 0) {
+        command->code = CMD_CHMOD;
+    } else if(strcmp(token, "move") == 0) {
+        command->code = CMD_MOVE;
+    } else if(strcmp(token, "delete") == 0) {
+        command->code = CMD_DELETE;
+    } else if(strcmp(token, "write") == 0) {
+        command->code = CMD_WRITE;
+    } else if(strcmp(token, "upload") == 0) {
+        command->code = CMD_UPLOAD_BEGIN;
+    } else if(strcmp(token, "download") == 0) {
+        command->code = CMD_DOWNLOAD_BEGIN;
+    } else if(strcmp(token, "transfer_request") == 0) {
+        command->code = CMD_TRANSFER_REQ;
+    } else if(strcmp(token, "accept") == 0) {
+        command->code = CMD_ACCEPT;
+    } else if(strcmp(token, "reject") == 0) {
+        command->code = CMD_REJECT;
     } else {
         free(copy);
         return -1; // unknown command
     }
+
 
     int arg_count = 0;
     while((token = strtok_r(NULL, " ", &saveptr)) != NULL && arg_count < MAX_ARGS) {
@@ -69,6 +98,12 @@ int parse_command(const char *line, cmd_t *command) {
                 if (sscanf(token + 8, "%ld", &command->offset) != 1) {
                     free(copy);
                     return -1; // error in number format
+                }
+                // if offset is negative, return error
+                if (command->offset < 0) {
+                    command->offset = -1; // reset to default
+                    free(copy);
+                    return -1;
                 }
             } else {
                 free(copy);
@@ -91,7 +126,54 @@ int parse_command(const char *line, cmd_t *command) {
     }
 
     // final check for correct number of parameters passed
-    
+    if(command->code == CMD_CREATE && arg_count!=2) {
+        free(copy);
+        return -1;
+    }
+    if(command->code == CMD_READ && arg_count!=1) {
+        free(copy);
+        return -1; 
+    }
+    if(command->code == CMD_CHMOD && arg_count!=2) {
+        free(copy);
+        return -1; 
+    }
+    if(command->code == CMD_MOVE && arg_count!=2) {
+        free(copy);
+        return -1; 
+    }
+    if(command->code == CMD_DELETE && arg_count!=1) {
+        free(copy);
+        return -1;
+    }
+    if(command->code == CMD_WRITE && arg_count!=1) {
+        free(copy);
+        return -1; 
+    }
+    if(command->code == CMD_UPLOAD_BEGIN && arg_count!=2) {
+        free(copy);
+        return -1; 
+    }
+    if(command->code == CMD_DOWNLOAD_BEGIN && arg_count!=2) {
+        free(copy);
+        return -1; 
+    }
+    if(command->code == CMD_TRANSFER_REQ && arg_count!=2) {
+        free(copy);
+        return -1; 
+    }
+    if(command->code == CMD_ACCEPT && arg_count!=2) {
+        free(copy);
+        return -1; 
+    }
+    // reject does not require any argument
+    if(command->code == CMD_CD && arg_count!=1) {
+        free(copy);
+        return -1; 
+    }
+    // list can be called without any argument, so no check is needed
+
+
 
     command->argc = arg_count;
     free(copy);

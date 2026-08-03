@@ -18,8 +18,10 @@ Responsible for:
 #include<fcntl.h> // fcntl
 #include<sys/wait.h> // waitpid
 #include<errno.h> // EINTR
-#include"network/network.h"
-#include"protocol/protocol.h"
+//#include"network.h"
+#include"network/network.h" // fix with -I
+//#include"protocol.h"
+#include"protocol/protocol.h" // fix with -I
 
 #define MAX_CLIENT_BUFFER 1024
 #define MAX_SERVER_BUFFER 1024
@@ -33,6 +35,7 @@ int background_operations; // global variable to hold the number of background o
 
 // Handle SIGCHLD to reap child processes and avoid zombies
 void handle_signal_child(int sig) {
+    (void)sig;
     // wait for all dead processes (SIGCHLD) without blocking
     int saved_errno = errno; 
     while(waitpid(-1, NULL, WNOHANG) > 0);
@@ -138,6 +141,10 @@ int wait_response(int fd){
                 fprintf(stderr, "Error: %s (%s)\n", msg, strerror(code));
             free(payload);
             return -1; // error
+        } else {
+            fprintf(stderr, "Unknown response from server\n");
+            free(payload);
+            return -1; // unknown response
         }
     }
 
@@ -146,6 +153,7 @@ int wait_response(int fd){
 }
 
 void spawn_background(cmd_t *command, int* pipe_fd, int socket_fd) {
+    (void)command;
     fflush(NULL);
     pid_t pid = fork();
     if(pid == 0){
@@ -253,6 +261,33 @@ int main(int argc, char *argv[]) {
             line[strcspn(line, "\n")] = '\0'; // remove newline character
 
             // implement commands parsing and handling mechanism
+
+            cmd_t command;
+
+            int result = parse_command(line, &command);
+            if(result < 0) {
+                fprintf(stderr, "Invalid command: %s\n", line);
+                continue; // continue to next iteration on error
+            }
+
+            if(command.code == CMD_EXIT) {
+                if(background_operations > 0) {
+                    printf("[INFO]: There are %d background operations running. Exiting is not permitted until they are completed.\n", background_operations);
+                    continue; // continue to next iteration, do not exit
+                }
+                printf("[INFO]: Exiting client.\n");
+                break; // exit the loop on 
+            }
+
+            // if -b option is set, spawn a background process to handle the command
+            if(command.is_background) {
+                spawn_background(&command, pipe_fd, socket_fd);
+                background_operations++;
+                continue; // continue to next iteration to wait for more input or server response
+            }
+
+            // send the command to the server
+            send_packet(socket_fd, command.code, command.buf, strlen(command.buf));
 
             continue;
         }

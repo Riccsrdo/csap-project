@@ -121,7 +121,7 @@ int send_ok(int fd, const char *payload, uint32_t payload_len){
     return send_packet(fd, RSP_OK, payload, payload_len);
 }
 
-int send_err(int fd, int err_code, const char *payload, uint32_t payload_len){
+int send_err(int fd, int err_code, const char *payload){ 
     // prepend err_code to the payload
     if (!payload) payload = "";
     int need = snprintf(NULL, 0, "%d %s", err_code, payload);

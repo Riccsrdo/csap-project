@@ -11,7 +11,7 @@
 // This struct is used to handle user session, each child will have its own
 typedef struct {
     int logged_in; // 1 if logged, 0 otherwise
-    char user[64]; // username of logged-in user
+    char user[32]; // username of logged-in user
     uid_t uid; // saved user id of the logged-in user, used in the server
     char home_path[PATH_MAX]; // home directory of the logged-in user
     char root_path[PATH_MAX]; // root of the server
@@ -31,5 +31,7 @@ int sb_append(strbuf_t *sb, const char *s, size_t n);
 
 // free memory allocated for the buffer
 void sb_free(strbuf_t *sb);
+
+extern gid_t server_gid; // global variable to hold the server's group ID
 
 #endif

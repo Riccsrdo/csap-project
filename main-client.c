@@ -22,6 +22,7 @@ Responsible for:
 #include"network/network.h" // fix with -I
 //#include"protocol.h"
 #include"protocol/protocol.h" // fix with -I
+#include"utils/utils.h" // fix with -I
 
 #define MAX_CLIENT_BUFFER 1024
 #define MAX_SERVER_BUFFER 1024
@@ -67,6 +68,8 @@ int start_client(char *ip_address, char *port_number){
         perror("socket");
         exit(EXIT_FAILURE);
     }
+
+    printf("[SETUP]: Socket created for client\n");
 
     struct sockaddr_in server_address; // struct to memorize server address information
     memset(&server_address, 0, sizeof(server_address)); // prepare memory for the struct
@@ -126,24 +129,33 @@ int wait_response(int fd){
             free(payload);
             return -1;
         }
+
+        #if DEBUG
+        printf("[DEBUG]: Received command: %d, payload content: %s\n", command, (char*)payload);
+        #endif
+
         // print, based on error code/success code, related message to stdout
         if(command == RSP_NOTIFY){
-            printf("%s \n", (char *)payload);
+            printf("[NOTIFY]: %s \n", (char *)payload);
             free(payload);
             continue; // continue to wait for the actual response
         } else if(command == RSP_OK) {
-            printf("Operation successful: %s \n", (char *)payload);
-
+            // check if payload is empty, if yes, print a default message, otherwise print the payload
+            if(payload_len == 0 || payload == NULL) {
+                printf("[Server]: OK\n");
+            } else {
+                printf("[Server]: \n%s \n", (char *)payload);
+            }
             free(payload);
             return 0; // success
         } else if(command == RSP_ERR) {
             int code; char msg[256];
             if (sscanf(payload, "%d %255[^\n]", &code, msg) == 2)
-                fprintf(stderr, "Error: %s (%s)\n", msg, strerror(code));
+                fprintf(stderr, "[ERROR]: %s (%s)\n", msg, strerror(code));
             free(payload);
             return -1; // error
         } else {
-            fprintf(stderr, "Unknown response from server\n");
+            fprintf(stderr, "[ERROR]: Unknown response from server\n");
             free(payload);
             return -1; // unknown response
         }
@@ -169,7 +181,7 @@ void spawn_background(cmd_t *command, int* pipe_fd, int socket_fd) {
         snprintf(payload, sizeof(payload), "login %s", username);
         send_packet(bg_socket_fd, CMD_LOGIN, payload, strlen(payload));
         if(wait_response(bg_socket_fd) < 0) {
-            fputs("Background operation failed to authenticate with server.\n", stdout);
+            fprintf(stderr, "[ERROR]: Background operation failed to authenticate with server.\n");
             close(bg_socket_fd);
             _exit(EXIT_FAILURE);
         }
@@ -208,6 +220,8 @@ int main(int argc, char *argv[]) {
     fd_set readfds;
 
     int socket_fd = start_client(ip_address, port_number); // start the client and get the socket descriptor
+
+    printf("[SETUP]: Client started. Connected to server at %s:%s\n", ip_address, port_number);
 
     // create a pipe for communication with child processes, which handles background operations
     int pipe_fd[2];
@@ -281,7 +295,7 @@ int main(int argc, char *argv[]) {
                     printf("[INFO]: There are %d background operations running. Exiting is not permitted until they are completed.\n", background_operations);
                     continue; // continue to next iteration, do not exit
                 }
-                printf("[INFO]: Exiting client.\n");
+                printf("[CLOSE]: Exiting client.\n");
                 break; // exit the loop on 
             }
 
@@ -289,6 +303,7 @@ int main(int argc, char *argv[]) {
             if(command.is_background) {
                 spawn_background(&command, pipe_fd, socket_fd);
                 background_operations++;
+                printf("[INFO]: Background operation started. Total background operations: %d\n", background_operations);
                 continue; // continue to next iteration to wait for more input or server response
             }
 

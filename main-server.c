@@ -68,6 +68,8 @@ int start_server(char *ip_address, char *port_number){
         exit(EXIT_FAILURE);
     }
 
+    printf("[SETUP]: Socket created successfully.\n");
+
     int opt1  = 1;
     // Set SO_REUSEADDR to allow the socket to be bound to an address that is already in use.
     if(setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt1, sizeof(opt1)) < 0) {
@@ -100,12 +102,16 @@ int start_server(char *ip_address, char *port_number){
         exit(EXIT_FAILURE);
     }
 
+    printf("[SETUP]: Socket bound to %s:%d\n", ip_address, port);
+
     // listen for incoming connections
     if(listen(sockfd, 10) < 0) {
         perror("listen");
         close(sockfd);
         exit(EXIT_FAILURE);
     }
+
+    printf("[SETUP]: Listening for incoming connections...\n");
 
     return sockfd;
 
@@ -152,9 +158,13 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         } else {
             // send success response to client
             char msg[128];
-            int n = snprintf(msg, sizeof(msg), "logged in as %s", session->user);
+            int n = snprintf(msg, sizeof(msg), "Logged in as %s", session->user);
             send_ok(clientSocket, msg, n);
         }
+
+        #if DEBUG
+        printf("[DEBUG]: User %s logged in with UID %d\n", session->user, session->uid);
+        #endif
 
         return;
     }
@@ -192,6 +202,10 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             // send success response to client
             send_ok(clientSocket, NULL, 0);
         }
+
+        #if DEBUG
+        printf("[DEBUG]: Create user command executed for user %s with permissions %o\n", cu_command.buf, (unsigned int)perms);
+        #endif
         
         return;
     }
@@ -201,7 +215,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
     // first check if user is logged in, if not send an error response to the client
     if(!session->logged_in) {
         // send error response to client indicating that login is required
-        const char *reason = "Login required";
+        const char *reason = "Login required, please execute first 'login <username>' command";
         send_err(clientSocket, EACCES, reason);
         return;
     }
@@ -223,7 +237,9 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             int r;
             if(list_command.buf[0] == '\0') {
                 // get current working directory
-                printf("[DEBUG]: Listing current working directory\n");
+                #if DEBUG
+                printf("[DEBUG]: User:%s Listing current working directory\n", session->user);
+                #endif
                 char cwd[PATH_MAX];
                 if(getcwd(cwd, sizeof(cwd)) == NULL) {
                     const char *reason = "Failed to get current working directory";
@@ -243,10 +259,14 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 }
                 #endif
             } else {
+                #if DEBUG
+                printf("[DEBUG]: User:%s Listing directory: %s\n", session->user, list_command.buf);
+                #endif
+
                 // allowed scope: root_path (for all other commands is home_path)
                 r = validate_path(list_command.buf, session->root_path, full_path);
                 if(r < 0) {
-                    const char *reason = "Invalid path";
+                    const char *reason = "Path outside of allowed scope";
                     send_err(clientSocket, EINVAL, reason);
                     return;
                 }
@@ -264,6 +284,12 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 const char *reason = "Failed to list directory";
                 sb_free(&sb);
                 send_err(clientSocket, -list_result, reason);
+                return;
+            }
+            // if empty
+            if(sb.len == 0) {
+                send_ok(clientSocket, "Directory is empty", strlen("Directory is empty"));
+                sb_free(&sb);
                 return;
             }
             send_ok(clientSocket, sb.data, sb.len);
@@ -328,6 +354,10 @@ void handle_session(int clientSocket) {
                 break;
             }
 
+            #if DEBUG
+            printf("[DEBUG]: Received command, payload content: %s\n", (char*)payload);
+            #endif
+
 
             dispatch(&session, clientSocket, command, payload, payload_len);
             free(payload); // free the payload after dispatching
@@ -343,6 +373,10 @@ void handle_session(int clientSocket) {
             }
             notify_buffer[n] = '\0'; // null-terminate the string
             // process the notification
+
+            #if DEBUG
+            printf("[DEBUG]: Received notification for a transfer request: %s\n", notify_buffer);
+            #endif
 
         }
     }
@@ -484,11 +518,14 @@ int main(int argc, char *argv[]) {
 
     if(server_gid == 0){
         int result = setup_server_gid(err_msg, err_size);
+        printf("[SETUP]: Server GID set to %d\n", server_gid);
         if(result < 0) {
             fprintf(stderr, "[SETUP] %s\n", err_msg);
             exit(EXIT_FAILURE);
         }
     }
+
+    printf("[SETUP]: Server loop started. \tType 'exit' to close\n");
 
     while(1){
         // clean file descriptor set
@@ -518,7 +555,7 @@ int main(int argc, char *argv[]) {
             buffer[bytes_read] = '\0';
             buffer[strcspn(buffer, "\n")] = '\0';
             if(strcmp(buffer, "exit") == 0) {
-                printf("Exiting server.\n");
+                printf("[CLOSE] Exiting server.\n");
                 break; // exit the loop on "exit" command
             } else {
                 printf("Unknown command: %s\n", buffer);
@@ -533,6 +570,8 @@ int main(int argc, char *argv[]) {
             clientAddressLen = sizeof(clientAddress);
 
             clientSocket = accept(s, (struct sockaddr*)&clientAddress, &clientAddressLen);
+
+            printf("[INFO]: New connection accepted from %s:%d\n", inet_ntoa(clientAddress.sin_addr), ntohs(clientAddress.sin_port));
 
             if(clientSocket < 0) {
                 if(errno == EINTR) continue; // if interrupted by signal, retry
@@ -568,6 +607,8 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, SIG_IGN); // ignore SIGTERM in the parent to avoid killing myself
     kill(0, SIGTERM); // send SIGTERM, 0 indicates all processes in the same process group
     
+    printf("[CLOSE] All children have been killed. \n");
+
     close(s);
 
     return 0;

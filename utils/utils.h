@@ -8,6 +8,8 @@
 #include<limits.h>
 #include<errno.h>
 
+#define DEBUG 0
+
 // This struct is used to handle user session, each child will have its own
 typedef struct {
     int logged_in; // 1 if logged, 0 otherwise

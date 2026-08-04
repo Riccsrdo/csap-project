@@ -12,6 +12,7 @@
 #include<ctype.h>
 #include<grp.h>
 #include<sys/wait.h>
+#include"../paths/paths.h"
 
 int setup_server_gid(char *error_msg, uint32_t err_size);
 

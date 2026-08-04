@@ -213,8 +213,8 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
 
     // perform canonicalization of the home_dir path to ensure it is within the root directory
     char resolved_home[PATH_MAX];
-    if(realpath(home_dir, resolved_home) == NULL) {
-        strncpy(err_msg, "Failed to resolve home directory path", err_size - 1);
+    if(validate_path(home_dir, session->root_path, resolved_home) < 0) {
+        strncpy(err_msg, "User's home directory is outside of the root directory", err_size - 1);
         err_msg[err_size - 1] = '\0';
         return -1;
     }

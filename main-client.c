@@ -30,7 +30,7 @@ Responsible for:
 char *ip_address; // global variable to hold the IP address
 char *port_number; // global variable to hold the port number
 
-char *username; // global variable to hold the username
+char username[64]; // global variable to hold the username
 int background_operations; // global variable to hold the number of background operations
 
 // Handle SIGCHLD to reap child processes and avoid zombies
@@ -133,6 +133,7 @@ int wait_response(int fd){
             continue; // continue to wait for the actual response
         } else if(command == RSP_OK) {
             printf("Operation successful: %s \n", (char *)payload);
+
             free(payload);
             return 0; // success
         } else if(command == RSP_ERR) {
@@ -163,7 +164,10 @@ void spawn_background(cmd_t *command, int* pipe_fd, int socket_fd) {
         // open a connection to the server for the background operation
         int bg_socket_fd = start_client(ip_address, port_number);
         // need to authenticate the background operation with the server, using the username
-        send_packet(bg_socket_fd, CMD_LOGIN, username, strlen(username));
+        char payload[256];
+        // concatenate "login [username]" to the payload
+        snprintf(payload, sizeof(payload), "login %s", username);
+        send_packet(bg_socket_fd, CMD_LOGIN, payload, strlen(payload));
         if(wait_response(bg_socket_fd) < 0) {
             fputs("Background operation failed to authenticate with server.\n", stdout);
             close(bg_socket_fd);
@@ -184,6 +188,8 @@ void spawn_background(cmd_t *command, int* pipe_fd, int socket_fd) {
 
 // default <IP> is 127.0.0.1, default <port> is 8080
 int main(int argc, char *argv[]) {
+
+    username[0] = '\0'; // initialize username to empty string
 
     // configure a handler for SIGCHLD to reap child processes and avoid zombies
     if(setup_signal_handler() < 0) {
@@ -287,7 +293,16 @@ int main(int argc, char *argv[]) {
             }
 
             // send the command to the server
-            send_packet(socket_fd, command.code, command.buf, strlen(command.buf));
+            send_packet(socket_fd, command.code, line, strlen(line));
+
+            
+            int rc = wait_response(socket_fd);
+
+            if(rc == 0 && command.code == CMD_LOGIN) {
+                // if login was successful, store the username for future background operations
+                strncpy(username, command.buf, sizeof(username) - 1);
+                username[sizeof(username) - 1] = '\0'; // ensure null-termination
+            }
 
             continue;
         }
@@ -308,6 +323,8 @@ int main(int argc, char *argv[]) {
                 printf("%s \n", (char *)payload);
                 free(payload);
                 continue;
+            } else {
+                free(payload);
             }
         }
 

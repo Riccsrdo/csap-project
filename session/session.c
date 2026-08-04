@@ -8,28 +8,37 @@ Responsible for:
 */
 #include"session.h"
 
+gid_t server_gid = 0;
+
 int create_home_directory(const char *root, const char *username, char *err_msg, 
     uint32_t err_size, mode_t perms, struct passwd *new_pwd) {
-    char home_dir[PATH_MAX];
+    char home_dir[PATH_MAX +64];
     snprintf(home_dir, sizeof(home_dir), "%s/%s", root, username);
 
     if(mkdir(home_dir, perms) < 0) {
-        snprintf(err_msg, err_size - 1, "Failed to create home directory: %s", strerror(errno));
+        if(errno == EEXIST) {
+            snprintf(err_msg, err_size , "Home directory already exists");
+            err_msg[err_size - 1] = '\0';
+            return -1;
+        }
+        snprintf(err_msg, err_size , "Failed to create home directory: %s", strerror(errno));
         err_msg[err_size - 1] = '\0';
         return -1;
     }
 
 
+
+
     // assign ownership of the home directory to the new user
     if(chown(home_dir, new_pwd->pw_uid, server_gid) < 0) {
-        snprintf(err_msg, err_size - 1, "Failed to set ownership of home directory: %s", strerror(errno));
+        snprintf(err_msg, err_size , "Failed to set ownership of home directory: %s", strerror(errno));
         err_msg[err_size - 1] = '\0';
         return -1;
     }
 
     // explicitly set the permissions of the home directory
     if(chmod(home_dir, perms) < 0) {
-        snprintf(err_msg, err_size - 1, "Failed to set permissions of home directory: %s", strerror(errno));
+        snprintf(err_msg, err_size , "Failed to set permissions of home directory: %s", strerror(errno));
         err_msg[err_size - 1] = '\0';
         return -1;
     }
@@ -50,8 +59,7 @@ int setup_server_gid(char *error_msg, uint32_t err_size) {
     // if the group does not exist, create it
     // this requires root privileges, so the server must be run with sudo
     if(seteuid(0) < 0) {
-        error_msg = "Failed to set effective UID to root for group creation";
-        error_msg[err_size - 1] = '\0';
+        snprintf(error_msg, err_size - 1, "Failed to set effective UID to root: %s", strerror(errno));
         return -1;
     }
 
@@ -59,14 +67,13 @@ int setup_server_gid(char *error_msg, uint32_t err_size) {
     fflush(NULL); // flush all stdio buffers before forking
     pid_t pid = fork();
     if(pid < 0) {
-        error_msg = "Failed to fork for group creation";
-        error_msg[err_size - 1] = '\0';
+        snprintf(error_msg, err_size - 1, "Failed to fork for group creation: %s", strerror(errno));
         return -1;
     } else if(pid == 0) { // child process
         execlp("groupadd", "groupadd", "csap_group", NULL);
         // if execlp returns, it means it failed
         perror("execlp groupadd");
-        exit(EXIT_FAILURE);
+        _exit(EXIT_FAILURE); // use _exit to avoid flushing stdio buffers again
     } else { // parent process
         int status;
         waitpid(pid, &status, 0);
@@ -79,14 +86,13 @@ int setup_server_gid(char *error_msg, uint32_t err_size) {
                 seteuid(getuid());
                 return 0;
             } else {
-                error_msg = "Failed to get group info after creation";
-                error_msg[err_size - 1] = '\0';
+                snprintf(error_msg, err_size - 1, "Failed to get group info after creation: %s", strerror(errno));
                 seteuid(getuid());
                 return -1;
             }
         }
         else {
-            error_msg = "Failed to create group";
+            snprintf(error_msg, err_size - 1, "Failed to create group: %s", strerror(errno));
             error_msg[err_size - 1] = '\0';
             seteuid(getuid());
             return -1;
@@ -108,7 +114,7 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
             err_msg[err_size - 1] = '\0';
             return -1;
         }
-        if(!isalnum(username[0])) {
+        if(!isalpha(username[0])) {
             strncpy(err_msg, "Username must start with a letter", err_size - 1);
             err_msg[err_size - 1] = '\0';
             return -1;
@@ -129,14 +135,6 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
             return -1;
         }
 
-        // if first user, create the group for the server, and add the user to that group
-        if(server_gid == 0){
-            int result = setup_server_gid(err_msg, err_size);
-            if(result < 0) {
-                return -1;
-            }
-        }
-
         // create the user, using fork() and execlp to call useradd
 
         // check if the server is running as root, if not return error
@@ -155,13 +153,11 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
             return -1;
         } else if(pid == 0) { // child process
             // set the group for the new user to the server's group
-            char gid_str[16];
-            snprintf(gid_str, sizeof(gid_str), "%d", server_gid);
             execlp("adduser", "adduser", "--disabled-password", "--gecos", "", "--ingroup", "csap_group",
             "--no-create-home", username, NULL);
             // if execlp returns, it means it failed
             perror("execlp adduser");
-            exit(EXIT_FAILURE);
+            _exit(EXIT_FAILURE); // use _exit to avoid flushing stdio buffers again
         } else { // parent process
             int status;
             waitpid(pid, &status, 0);
@@ -238,7 +234,7 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
     session->home_path[sizeof(session->home_path) - 1] = '\0';
 
 
-    char fifo_name[PATH_MAX];
+    char fifo_name[PATH_MAX + 64];
     snprintf(fifo_name, sizeof(fifo_name), "%s/.sessions/fifo_%d", session->root_path, getpid());
 
     // Unlink the fifo if it already exists
@@ -260,9 +256,20 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
         return -1;
     }
 
+    // set cwd of the user to their home directory
+    if(chdir(home_dir) < 0) {
+        snprintf(err_msg, err_size - 1, "Failed to change directory to user's home: %s", strerror(errno));
+        return -1;
+    }
 
-    setegid(server_gid);
-    seteuid(session->uid);
+    if(setegid(server_gid) < 0) {
+        snprintf(err_msg, err_size - 1, "Failed to set effective GID: %s", strerror(errno));
+        return -1;
+    }
+    if(seteuid(session->uid) < 0) {
+        snprintf(err_msg, err_size - 1, "Failed to set effective UID: %s", strerror(errno));
+        return -1;
+    }
 
     session->logged_in = 1;
 

@@ -35,8 +35,6 @@ Responsible for:
 
 char root_directory[PATH_MAX]; // global variable to hold the root directory path
 
-gid_t server_gid; // global variable to hold the server's group ID
-
 void handle_signals(int sig) {
     // wait for all dead processes (SIGCHLD) without blocking
     (void)sig; 
@@ -72,8 +70,10 @@ int start_server(char *ip_address, char *port_number){
 
     int opt1  = 1;
     // Set SO_REUSEADDR to allow the socket to be bound to an address that is already in use.
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt1, sizeof(opt1)); 
-
+    if(setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt1, sizeof(opt1)) < 0) {
+        perror("setsockopt");
+        exit(EXIT_FAILURE);
+    }
 
     struct sockaddr_in server_address;
     memset(&server_address, 0, sizeof(server_address));
@@ -122,7 +122,7 @@ void configure_read_set(fd_set *readfds, int socket_fd) {
 
 void dispatch(session_t *session, int clientSocket, uint8_t command, void *payload, uint32_t payload_len) {
     
-    char *error_msg = malloc(256);
+    char error_msg[256];
     error_msg[0] = '\0'; // initialize error message to empty string
 
     // Commands without login
@@ -130,36 +130,61 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         
         // parse payload to extract username
         cmd_t login_command;
+        login_command.code = CMD_LOGIN;
         if(parse_command(payload, &login_command) < 0) {
-            const char *error_msg = "Failed to parse command";
-            send_err(clientSocket, EINVAL, error_msg);
+            const char *reason = "Failed to parse command";
+            send_err(clientSocket, EINVAL, reason);
             return;
         }
 
         char *username = login_command.buf;
-        username[sizeof(login_command.buf) - 1] = '\0'; 
         if(strlen(username) > sizeof(session->user) - 1) {
-            const char *error_msg = "Username too long";
-            send_err(clientSocket, EINVAL, error_msg);
+            const char *reason = "Username too long";
+            send_err(clientSocket, EINVAL, reason);
             return;
         }
 
         uint32_t err_size = sizeof(error_msg);
         int result = handle_login(session, username, error_msg, err_size);
-        // check if err_message is not empty, if so send it to the client
-        if(strlen(error_msg) > 0) {
+        if(result < 0) {
+            // send error response to client indicating that login failed
             send_err(clientSocket, EACCES, error_msg);
         } else {
             // send success response to client
-            send_ok(clientSocket, NULL, 0);
+            char msg[128];
+            int n = snprintf(msg, sizeof(msg), "logged in as %s", session->user);
+            send_ok(clientSocket, msg, n);
         }
+
         return;
     }
     if(command == CMD_CREATE_USER) {
-        char username[256]; // temp
-        mode_t perms = 0755; // default permissions, temp
+    
+        cmd_t cu_command;
+        if(parse_command(payload, &cu_command) < 0) {
+            const char *reason = "Failed to parse command";
+            send_err(clientSocket, EINVAL, reason);
+            return;
+        }
+
+        if(cu_command.argc < 2) {
+            const char *reason = "Insufficient arguments for create_user";
+            send_err(clientSocket, EINVAL, reason);
+            return;
+        }
+
+        // permissions in octal
+        char *end;
+        errno = 0;
+        long perms = strtol(cu_command.buf2, &end, 8);
+        if(errno != 0 || *end != '\0' || perms < 0 || perms > 0777) {
+            const char *reason = "Invalid permissions format";
+            send_err(clientSocket, EINVAL, reason);
+            return;
+        }
+
         uint32_t err_size = sizeof(error_msg);
-        int result = handle_create_user(username, perms, session->root_path, error_msg, err_size);
+        int result = handle_create_user(cu_command.buf, perms, session->root_path, error_msg, err_size);
         // check if err_message is not empty, if so send it to the client
         if(strlen(error_msg) > 0) {
             send_err(clientSocket, EACCES, error_msg);
@@ -167,6 +192,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             // send success response to client
             send_ok(clientSocket, NULL, 0);
         }
+        
         return;
     }
 
@@ -175,8 +201,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
     // first check if user is logged in, if not send an error response to the client
     if(!session->logged_in) {
         // send error response to client indicating that login is required
-        const char *error_msg = "Login required";
-        send_err(clientSocket, EACCES, error_msg);
+        const char *reason = "Login required";
+        send_err(clientSocket, EACCES, reason);
         return;
     }
 
@@ -186,47 +212,58 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             // tokenize payload with parse_command()
             cmd_t list_command;
             if(parse_command(payload, &list_command) < 0) {
-                const char *error_msg = "Failed to parse command";
-                send_err(clientSocket, EINVAL, error_msg);
-                return;
-            }
-
-            // allowed scope: root_path (for all other commands is home_path)
-            char full_path[PATH_MAX];
-            int r = validate_path(session->root_path, list_command.buf, full_path);
-            if(r < 0) {
-                const char *error_msg = "Invalid path";
-                send_err(clientSocket, EINVAL, error_msg);
+                const char *reason = "Failed to parse command";
+                send_err(clientSocket, EINVAL, reason);
                 return;
             }
 
             // if path is NULL (from payload), pass NULL to list() to list current working directory
             // validate cwd against root_path, if not valid return error
+            char full_path[PATH_MAX];
+            int r;
             if(list_command.buf[0] == '\0') {
                 // get current working directory
+                printf("[DEBUG]: Listing current working directory\n");
                 char cwd[PATH_MAX];
                 if(getcwd(cwd, sizeof(cwd)) == NULL) {
-                    const char *error_msg = "Failed to get current working directory";
-                    send_err(clientSocket, EINVAL, error_msg);
+                    const char *reason = "Failed to get current working directory";
+                    send_err(clientSocket, EINVAL, reason);
                     return;
                 }
+                #if 0 // removed for now, as it is not needed, but can be useful for future debugging
                 // validate cwd against root_path
-                r = validate_path(session->root_path, cwd, full_path);
+
+                printf("[DEBUG]: Validating current working directory: %s against root path: %s\n", cwd, session->root_path);
+                r = validate_path(cwd, session->root_path, full_path);
                 if(r < 0) {
-                    const char *error_msg = "Invalid current working directory";
-                    send_err(clientSocket, EINVAL, error_msg);
+                    printf("[CHECKPOINT]\n");
+                    const char *reason = "Invalid current working directory";
+                    send_err(clientSocket, EINVAL, reason);
+                    return;
+                }
+                #endif
+            } else {
+                // allowed scope: root_path (for all other commands is home_path)
+                r = validate_path(list_command.buf, session->root_path, full_path);
+                if(r < 0) {
+                    const char *reason = "Invalid path";
+                    send_err(clientSocket, EINVAL, reason);
                     return;
                 }
             }
+
+
 
             // TODO: lock on file
 
             // call list() in fsops
             strbuf_t sb;
+            memset(&sb, 0, sizeof(sb));
             int list_result = list(full_path, &sb);
             if(list_result < 0) {
-                const char *error_msg = "Failed to list directory";
-                send_err(clientSocket, -list_result, error_msg);
+                const char *reason = "Failed to list directory";
+                sb_free(&sb);
+                send_err(clientSocket, -list_result, reason);
                 return;
             }
             send_ok(clientSocket, sb.data, sb.len);
@@ -236,8 +273,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         }
         default: {
             // send error response to client indicating that the command is not recognized
-            const char *error_msg = "Command not recognized";
-            send_err(clientSocket, EINVAL, error_msg);
+            const char *reason = "Command not recognized";
+            send_err(clientSocket, EINVAL, reason);
         }
     }
 
@@ -291,6 +328,7 @@ void handle_session(int clientSocket) {
                 break;
             }
 
+
             dispatch(&session, clientSocket, command, payload, payload_len);
             free(payload); // free the payload after dispatching
         }
@@ -303,6 +341,7 @@ void handle_session(int clientSocket) {
                 perror("read from pipe");
                 break;
             }
+            notify_buffer[n] = '\0'; // null-terminate the string
             // process the notification
 
         }
@@ -351,8 +390,37 @@ void create_root_directory(char *root_directory) {
 
     // create .sessions directory inside the root directory
     snprintf(sessions_dir, sizeof(sessions_dir), "%s/.sessions", root_directory);
-    if(mkdir(sessions_dir, 0755) < 0 && errno != EEXIST) {
+    if(mkdir(sessions_dir, 0700) < 0 && errno != EEXIST) {
         perror("mkdir .sessions");
+        exit(EXIT_FAILURE);
+    }
+
+    // clean any remaining enty in .sessions directory from previous runs
+    DIR *dir = opendir(sessions_dir);
+    if(dir) {
+        struct dirent *entry;
+        while((entry = readdir(dir)) != NULL) {
+            if(strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+            // if entry name begins with "fifo_"
+            if(strncmp(entry->d_name, "fifo_", 5) == 0) {
+                // extract the PID from the entry name
+                pid_t pid = atoi(entry->d_name + 5);
+                // check if the process with that PID is still running (0 is commonly used to check for existence)
+                if(kill(pid, 0) == -1 && errno == ESRCH) {
+                    // process does not exist, safe to remove the fifo
+                    char fifo_path[PATH_MAX + 64];
+                    snprintf(fifo_path, sizeof(fifo_path), "%s/%s", sessions_dir, entry->d_name);
+                    if(unlink(fifo_path) < 0) {
+                        perror("unlink fifo");
+                    } else {
+                        printf("[SETUP]: Removed stale FIFO: %s\n", fifo_path);
+                    }
+                }
+            }
+        }
+        closedir(dir);
+    } else {
+        perror("opendir .sessions");
         exit(EXIT_FAILURE);
     }
 
@@ -373,6 +441,8 @@ server is started with sudo, so I can create users through adduser and add them 
 int main(int argc, char *argv[]) {
 
     umask(0); // set umask to 0 to allow full permissions for created files and directories
+
+    setpgid(0, 0); // set the process group ID of the calling process to its own PID, so that all child processes are in the same group
 
     if(argc < 2) {
         fprintf(stderr, "Usage: %s <root_directory> [<IP>] [<port>]\n", argv[0]);
@@ -396,6 +466,8 @@ int main(int argc, char *argv[]) {
 
     int s = start_server(ip_address, port_number);
 
+    printf("[SETUP]: Server started on %s:%s\n", ip_address, port_number);
+
     fd_set readfds;
 
     // determine max file descriptor for select() between stdin and listen socket
@@ -406,6 +478,17 @@ int main(int argc, char *argv[]) {
     int clientSocket; // fd used for the accepted connection
     int select_result; // result of select()
     char buffer[MAX_CLIENT_BUFFER]; // buffer for reading data from clients or stdin
+
+    char err_msg[256]; // buffer for error messages
+    uint32_t err_size = sizeof(err_msg);
+
+    if(server_gid == 0){
+        int result = setup_server_gid(err_msg, err_size);
+        if(result < 0) {
+            fprintf(stderr, "[SETUP] %s\n", err_msg);
+            exit(EXIT_FAILURE);
+        }
+    }
 
     while(1){
         // clean file descriptor set
@@ -422,8 +505,15 @@ int main(int argc, char *argv[]) {
         if(FD_ISSET(STDIN_FILENO, &readfds)) {
             // read content from stdin
             ssize_t bytes_read = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
-            if(bytes_read <= 0) {
-                break; // exit the loop on error
+            if(bytes_read < 0) {
+                if(errno == EINTR) continue; // if interrupted by signal, retry
+                perror("read from stdin");
+                break;
+            }
+            if(bytes_read == 0) {
+                // EOF, stdin closed
+                printf("Stdin closed. Exiting server.\n");
+                break;
             }
             buffer[bytes_read] = '\0';
             buffer[strcspn(buffer, "\n")] = '\0';
@@ -475,8 +565,8 @@ int main(int argc, char *argv[]) {
     }
     // kill all child processes before exiting, as if we're out the loop the server is shutting / there's been an error
     
-    //signal(SIGTERM, SIG_IGN); // ignore SIGTERM in the parent to avoid killing myself
-    //kill(0, SIGTERM); // send SIGTERM, 0 indicates all processes in the same process group
+    signal(SIGTERM, SIG_IGN); // ignore SIGTERM in the parent to avoid killing myself
+    kill(0, SIGTERM); // send SIGTERM, 0 indicates all processes in the same process group
     
     close(s);
 

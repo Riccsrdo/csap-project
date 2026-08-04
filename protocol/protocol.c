@@ -7,15 +7,6 @@ Responsible for:
 
 #include"protocol.h"
 
-// useful to associate command names with their codes, for parsing and serialization
-static const struct 
-{ 
-    const char *name; 
-    uint8_t code; 
-} CMDS[] = {
-    {"login", CMD_LOGIN}, {"list", CMD_LIST}, {"cd", CMD_CD}, {"read", CMD_READ},
-    {"exit", CMD_EXIT}
-};
 
 // parse a command line into a cmd_t structure
 // parse -b as background operation
@@ -172,6 +163,8 @@ int parse_command(const char *line, cmd_t *command) {
         return -1; 
     }
     // list can be called without any argument, so no check is needed
+    if (command->code == CMD_CREATE_USER && arg_count != 2) { free(copy); return -1; }
+    if (command->code == CMD_LOGIN       && arg_count != 1) { free(copy); return -1; }
 
 
 

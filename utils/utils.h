@@ -36,4 +36,6 @@ void sb_free(strbuf_t *sb);
 
 extern gid_t server_gid; // global variable to hold the server's group ID
 
+int validate_permissions(long *perms, char *buf);
+
 #endif

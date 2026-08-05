@@ -65,3 +65,14 @@ void sb_free(strbuf_t *sb) {
         sb->cap = 0;
     }
 }
+
+int validate_permissions(long *perms, char *buf){
+    char *end;
+    errno = 0;
+    long val = strtol(buf, &end, 8);
+    if(errno != 0 || *end != '\0' || val < 0 || val > 0777) {
+        return -1;
+    }
+    *perms = val;
+    return 0;
+}

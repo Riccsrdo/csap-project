@@ -14,8 +14,20 @@
 #include<errno.h> // for error handling
 //#include"utils.h" 
 #include"../utils/utils.h" // fix with makefile -I
+#include<pwd.h>
+#include<grp.h>
 
 int list(char *path, strbuf_t *sb);
+
+int create_cmd(const char *path, mode_t perms, int is_dir);
+
+int chmod_cmd(const char *path, mode_t perms);
+
+int move_cmd(const char *src, const char *dest);
+
+int cd_cmd(const char *path);
+
+int delete_cmd(const char *path);
 
 
 #endif

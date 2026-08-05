@@ -128,7 +128,7 @@ int send_err(int fd, int err_code, const char *payload){
     char *buf = malloc(need + 1);
     if (!buf) return -1;
     snprintf(buf, need + 1, "%d %s", err_code, payload);
-    int ret = send_packet(fd, RSP_ERR, buf, need);       /* need, non total_len */
+    int ret = send_packet(fd, RSP_ERR, buf, need); 
     free(buf);
     return ret;
 }

@@ -5,6 +5,88 @@ Responsible for:
 */
 #include"fsops.h"
 
+// -----------------------------------------------------------------------------------------------------
+// ----------------------------------------- delete() --------------------------------------------------
+// -----------------------------------------------------------------------------------------------------
+
+int delete_cmd(const char *path) {
+    struct stat st;
+    if(stat(path, &st) < 0) {
+        return -errno;
+    }
+
+    if(S_ISDIR(st.st_mode)) {
+        // if it's a directory
+        if(rmdir(path) < 0) {
+            return -errno;
+        }
+    } else {
+        // if it's a file
+        if(unlink(path) < 0) { // unlink is used to delete files, by removing the link to the file in the filesystem
+            return -errno;
+        }
+    }
+
+    return 0;
+}
+
+// -----------------------------------------------------------------------------------------------------
+// ------------------------------------------ cd() -----------------------------------------------------
+// -----------------------------------------------------------------------------------------------------
+
+int cd_cmd(const char *path) {
+    if(chdir(path) < 0) {
+        return -errno;
+    }
+    return 0;
+}
+
+//-----------------------------------------------------------------------------------------------------
+// ----------------------------------------- move() ----------------------------------------------------
+// -----------------------------------------------------------------------------------------------------
+
+int move_cmd(const char *src, const char *dest) {
+    if(rename(src, dest) < 0) {
+        return -errno;
+    }
+    return 0;
+}
+
+//-----------------------------------------------------------------------------------------------------
+// ----------------------------------------- chmod() ---------------------------------------------------
+// -----------------------------------------------------------------------------------------------------
+
+int chmod_cmd(const char *path, mode_t perms) {
+    if(chmod(path, perms) < 0) {
+        return -errno;
+    }
+    return 0;
+}
+
+// -----------------------------------------------------------------------------------------------------
+// ----------------------------------------- create() ---------------------------------------------------
+// -----------------------------------------------------------------------------------------------------
+
+
+int create_cmd(const char *path, mode_t perms, int is_dir) {
+    // create a file or directory based on is_dir flag
+    if(is_dir) {
+        if(mkdir(path, perms) < 0) {
+            return -errno;
+        }
+        return 0;
+
+    } else {
+        int fd = open(path, O_CREAT | O_EXCL | O_WRONLY, perms);
+        if(fd < 0) {
+            return -errno;
+        }
+        close(fd);
+        return 0;
+    }
+
+}
+
 
 // -----------------------------------------------------------------------------------------------------
 // ----------------------------------------- list() ----------------------------------------------------
@@ -48,12 +130,15 @@ int constructFileInfo(strbuf_t *sb, struct stat *fileStat, const char *filename)
 
     char line[1024]; // temporary buffer to hold the formatted line
 
+    char *user_name = getpwuid(fileStat->st_uid) ? getpwuid(fileStat->st_uid)->pw_name : "unknown";
+    char *group_name = getgrgid(fileStat->st_gid) ? getgrgid(fileStat->st_gid)->gr_name : "unknown";
+
     // append remaining details to the output buffer
     int written = snprintf(line, sizeof(line),
-                           "%s %u %u %lu %lld %s %s\n",
+                           "%s %s %s %lu %lld %s %s\n",
                            perms,
-                           (unsigned int)fileStat->st_uid,
-                           (unsigned int)fileStat->st_gid,
+                           user_name,
+                           group_name,
                            (unsigned long)fileStat->st_nlink,
                            (long long)fileStat->st_size,
                            time_buf,

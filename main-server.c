@@ -143,6 +143,14 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             return;
         }
 
+        // if user has already logged in, send error response to client
+        if(session->logged_in) {
+            char reason[256];  
+            snprintf(reason, sizeof(reason), "User %s is already logged in", session->user);
+            send_err(clientSocket, EACCES, reason);
+            return;
+        }
+
         char *username = login_command.buf;
         if(strlen(username) > sizeof(session->user) - 1) {
             const char *reason = "Username too long";
@@ -183,11 +191,9 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             return;
         }
 
-        // permissions in octal
-        char *end;
-        errno = 0;
-        long perms = strtol(cu_command.buf2, &end, 8);
-        if(errno != 0 || *end != '\0' || perms < 0 || perms > 0777) {
+        long perms = 0;
+        int r = validate_permissions(&perms, cu_command.buf2);
+        if(r < 0) {
             const char *reason = "Invalid permissions format";
             send_err(clientSocket, EINVAL, reason);
             return;
@@ -222,6 +228,188 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
 
     // terminate with send_ok or send_err, depending on the result of the command execution
     switch(command){
+        case(CMD_CREATE): {
+            cmd_t create_command;
+            if(parse_command(payload, &create_command) < 0) {
+                const char *reason = "Failed to parse command";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            // validate path against home_path, if not valid return error
+            char full_path[PATH_MAX];
+            int r = validate_path(create_command.buf, session->home_path, full_path);
+            if(r < 0) {
+                const char *reason = "Path outside of allowed scope";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            long perms = 0;
+            r = validate_permissions(&perms, create_command.buf2);
+            if(r < 0) {
+                const char *reason = "Invalid permissions format";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            int create_result = create_cmd(full_path, perms, create_command.is_dir);
+            if(create_result < 0) {
+                const char *reason = "Failed to create file/directory";
+                send_err(clientSocket, -create_result, reason);
+                return;
+            }
+
+            const char *reason = "File/Directory created successfully";
+            send_ok(clientSocket, reason, strlen(reason));
+
+            break;
+        }
+        case(CMD_CHMOD): {
+
+            cmd_t chmod_command;
+            if(parse_command(payload, &chmod_command) < 0) {
+                const char *reason = "Failed to parse command";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            // validate path against home_path, if not valid return error
+            char full_path[PATH_MAX];
+            int r = validate_path(chmod_command.buf, session->home_path, full_path);
+            if(r < 0) {
+                const char *reason = "Path outside of allowed scope";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            long perms = 0;
+            r = validate_permissions(&perms, chmod_command.buf2);
+            if(r < 0) {
+                const char *reason = "Invalid permissions format";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            int chmod_result = chmod_cmd(full_path, perms);
+            if(chmod_result < 0) {
+                const char *reason = "Failed to change permissions";
+                send_err(clientSocket, -chmod_result, reason);
+                return;
+            }
+
+            const char *reason = "Permissions changed successfully";
+            send_ok(clientSocket, reason, strlen(reason));
+
+            break;
+        }
+        case(CMD_MOVE): {
+            cmd_t move_command;
+            if(parse_command(payload, &move_command) < 0) {
+                const char *reason = "Failed to parse command";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            // validate source path against home_path, if not valid return error
+            char full_src_path[PATH_MAX];
+            int r = validate_path(move_command.buf, session->home_path, full_src_path);
+            if(r < 0) {
+                const char *reason = "Source path outside of allowed scope";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            // validate destination path against home_path, if not valid return error
+            char full_dest_path[PATH_MAX];
+            r = validate_path(move_command.buf2, session->home_path, full_dest_path);
+            if(r < 0) {
+                const char *reason = "Destination path outside of allowed scope";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            int move_result = move_cmd(full_src_path, full_dest_path);
+            if(move_result < 0) {
+                const char *reason = "Failed to move file/directory";
+                send_err(clientSocket, -move_result, reason);
+                return;
+            }
+
+            const char *reason = "File/Directory moved successfully";
+            send_ok(clientSocket, reason, strlen(reason));
+
+            break;
+        }
+        case(CMD_UPLOAD_BEGIN): {
+            break;
+        }
+        case(CMD_DOWNLOAD_BEGIN): {
+            break;
+        }
+        case(CMD_CD): {
+            cmd_t cd_command;
+            if(parse_command(payload, &cd_command) < 0) {
+                const char *reason = "Failed to parse command";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            // validate path against home_path, if not valid return error
+            char full_path[PATH_MAX];
+            int r = validate_path(cd_command.buf, session->home_path, full_path);
+            if(r < 0) {
+                const char *reason = "Path outside of allowed scope";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            int cd_result = cd_cmd(full_path);
+            if(cd_result < 0) {
+                const char *reason = "Failed to change directory";
+                send_err(clientSocket, -cd_result, reason);
+                return;
+            }
+
+            const char *reason = "Directory changed successfully";
+            send_ok(clientSocket, reason, strlen(reason));
+
+            break;
+        }
+        case(CMD_READ): {
+            break;
+        }
+        case(CMD_WRITE): {
+            break;
+        }
+        case(CMD_DELETE): {
+            cmd_t delete_command;
+            if(parse_command(payload, &delete_command) < 0) {
+                const char *reason = "Failed to parse command";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            // validate path against home_path, if not valid return error
+            char full_path[PATH_MAX];
+            int r = validate_path(delete_command.buf, session->home_path, full_path);
+            if(r < 0) {
+                const char *reason = "Path outside of allowed scope";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            int delete_result = delete_cmd(full_path);
+            if(delete_result < 0) {
+                const char *reason = "Failed to delete file/directory";
+                send_err(clientSocket, -delete_result, reason);
+                return;
+            }
+            const char *reason = "File/Directory deleted successfully";
+            send_ok(clientSocket, reason, strlen(reason));
+
+            break;
+        }
         case(CMD_LIST): {
             // tokenize payload with parse_command()
             cmd_t list_command;
@@ -246,6 +434,10 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                     send_err(clientSocket, EINVAL, reason);
                     return;
                 }
+
+                // copy cwd to full_path
+                strncpy(full_path, cwd, sizeof(full_path) - 1);
+                full_path[sizeof(full_path) - 1] = '\0'; // ensure null
                 #if 0 // removed for now, as it is not needed, but can be useful for future debugging
                 // validate cwd against root_path
 
@@ -288,7 +480,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             }
             // if empty
             if(sb.len == 0) {
-                send_ok(clientSocket, "Directory is empty", strlen("Directory is empty"));
+                const char *reason = "Directory is empty";
+                send_ok(clientSocket, reason, strlen(reason));
                 sb_free(&sb);
                 return;
             }
@@ -366,7 +559,7 @@ void handle_session(int clientSocket) {
         if(session.notify_fd >= 0 && FD_ISSET(session.notify_fd, &readfds)) {
             // handle transfer requests
             char notify_buffer[256];
-            ssize_t n = read(session.notify_fd, notify_buffer, sizeof(notify_buffer));
+            ssize_t n = read(session.notify_fd, notify_buffer, sizeof(notify_buffer)-1);
             if(n < 0) {
                 perror("read from pipe");
                 break;
@@ -424,7 +617,7 @@ void create_root_directory(char *root_directory) {
 
     // create .sessions directory inside the root directory
     snprintf(sessions_dir, sizeof(sessions_dir), "%s/.sessions", root_directory);
-    if(mkdir(sessions_dir, 0700) < 0 && errno != EEXIST) {
+    if(mkdir(sessions_dir, 0770) < 0 && errno != EEXIST) { // 0770 to allow group members to access the directory
         perror("mkdir .sessions");
         exit(EXIT_FAILURE);
     }

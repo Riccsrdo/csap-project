@@ -240,7 +240,7 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
     // Unlink the fifo if it already exists
     unlink(fifo_name);
 
-    if(mkfifo(fifo_name, 0600) <0){
+    if(mkfifo(fifo_name, 0660) <0){ // 0660 to allow group members to read/write
         strncpy(err_msg, "Failed to create FIFO for notifications", err_size - 1);
         err_msg[err_size - 1] = '\0';
         perror("mkfifo");

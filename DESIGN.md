@@ -11,6 +11,7 @@
 - for handling notifications between different children (used in transfers), I use a named pipe, the FIFO, with each child having its own FIFO in which processes can write, stored in .sessions/, and the name is determined by the PID.
 - I start the server with root privileges (using `sudo`). After performing a login through the child process, the privileges are dropped to user's ones (if the user has not been created yet, I create it), and to common group id, through `seteuid()` and `setegid()`. We can perform an escalation of privileges as the saved-set-uid is 0 (root), if necessary.
 - I configure `umask(0)` to ensure the creation of files and directories with the specified permissions, otherwise requested permissions are && with the umask, and correct permissions might not be granted.
+- for each received command, I follow the same idea: first I validate the provided path (if available), then I take a lock on resources (if necessary), I call the function in fsops (file), answer based on the returned value, and release resources.
 
 ## Client
 

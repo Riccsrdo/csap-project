@@ -226,13 +226,6 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
         return -1;
     }
 
-    // populate the session struct with the user's information
-    session->uid = pwd->pw_uid;
-    strncpy(session->user, username, sizeof(session->user) - 1);
-    session->user[sizeof(session->user) - 1] = '\0';
-    snprintf(session->home_path, sizeof(session->home_path), "%s", resolved_home);
-    session->home_path[sizeof(session->home_path) - 1] = '\0';
-
 
     char fifo_name[PATH_MAX + 64];
     snprintf(fifo_name, sizeof(fifo_name), "%s/.sessions/fifo_%d", session->root_path, getpid());
@@ -247,8 +240,10 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
         return -1;
     }
 
+    int n_fd = 0;
+
     // open fifo for reading and writing, I avoid in this way blocking behaviour and EOF
-    if((session->notify_fd = open(fifo_name, O_RDWR)) < 0){
+    if((n_fd = open(fifo_name, O_RDWR)) < 0){
         perror("open fifo");
         strncpy(err_msg, "Failed to open FIFO for notifications", err_size - 1);
         err_msg[err_size - 1] = '\0';
@@ -259,6 +254,28 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
     // set cwd of the user to their home directory
     if(chdir(home_dir) < 0) {
         snprintf(err_msg, err_size - 1, "Failed to change directory to user's home: %s", strerror(errno));
+        return -1;
+    }
+
+    session->notify_fd = n_fd; // save the notify fd in the session struct
+    // populate the session struct with the user's information
+    session->uid = pwd->pw_uid;
+    strncpy(session->user, username, sizeof(session->user) - 1);
+    session->user[sizeof(session->user) - 1] = '\0';
+    snprintf(session->home_path, sizeof(session->home_path), "%s", resolved_home);
+    session->home_path[sizeof(session->home_path) - 1] = '\0';
+
+    // set ownership of the .sessions dir to "root:csap_group"
+    char sessions_dir[PATH_MAX];
+    snprintf(sessions_dir, sizeof(sessions_dir), "%s/.sessions", session->root_path);
+    if(chown(sessions_dir, 0, server_gid) < 0) {
+        snprintf(err_msg, err_size - 1, "Failed to set ownership of .sessions directory: %s", strerror(errno));
+        return -1;
+    }
+
+    // set ownership of the fifo to user:csap_group
+    if(chown(fifo_name, session->uid, server_gid) < 0){
+        snprintf(err_msg, err_size - 1, "Failed to set ownership of FIFO: %s", strerror(errno));
         return -1;
     }
 

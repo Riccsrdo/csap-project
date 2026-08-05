@@ -22,6 +22,7 @@ Responsible for:
 #include"network/network.h" // fix with -I
 //#include"protocol.h"
 #include"protocol/protocol.h" // fix with -I
+#include "transfer/transfer.h"
 #include"utils/utils.h" // fix with -I
 
 #define MAX_CLIENT_BUFFER 1024
@@ -117,6 +118,26 @@ int configure_read_set(fd_set *readfds, int socket_fd, int pipe_fd) {
     
 }
 
+/*
+Function used to read one line from stdin or socket, byte by byte.
+*/
+ssize_t read_line(int fd, char *buf, size_t size){
+    size_t i = 0;
+    while(i + 1 < size){
+        char c;
+        ssize_t n = read(fd, &c, 1);
+        if(n < 0){
+            if(errno == EINTR) continue; // interrupted by a signal, retry
+            return -1;
+        }
+        if(n == 0) break;    // EOF
+        if(c == '\n') break; // end of the command, the newline is consumed
+        buf[i++] = c;
+    }
+    buf[i] = '\0';
+    return (ssize_t)i;
+}
+
 // Waits for a response from the server, handling asynchronous notifications, printing them to stdout
 int wait_response(int fd){
     for(;;){
@@ -162,6 +183,126 @@ int wait_response(int fd){
     }
 
     // should not reach here
+    return -1;
+}
+
+
+int wait_response_payload(int fd, char *out, size_t out_size, uint32_t *out_len){
+    if(out && out_size > 0) out[0] = '\0';
+    if(out_len) *out_len = 0;
+
+    for(;;){
+        uint8_t command;
+        char *payload = NULL;
+        uint32_t payload_len;
+
+        // receive a packet from the server, which could be a notification, an OK response, or an error response
+        if(recv_packet(fd, (char **)&payload, &command, &payload_len) < 0) {
+            fprintf(stderr, "Error receiving packet from server\n");
+            free(payload);
+            return -1;
+        }
+
+        if(command == RSP_NOTIFY){ // if it's a notification, print it to stdout and continue waiting for the actual response
+            printf("[NOTIFY]: %s \n", (char *)payload);
+            free(payload);
+            continue; // asynchronous notification, keep waiting for the real answer
+        } else if(command == RSP_OK) {
+            if(out && out_size > 0){ // if the caller provided a buffer, copy the payload into it
+                size_t n = (payload_len < out_size - 1) ? payload_len : out_size - 1;
+                if(payload && n > 0) memcpy(out, payload, n);
+                out[n] = '\0';
+            }
+            if(out_len) *out_len = payload_len;
+            free(payload);
+            return 0;
+        } else if(command == RSP_ERR) {
+            int code; char msg[256];
+            if (payload && sscanf(payload, "%d %255[^\n]", &code, msg) == 2)
+                fprintf(stderr, "[ERROR]: %s (%s)\n", msg, strerror(code));
+            else
+                fprintf(stderr, "[ERROR]: server refused the command\n");
+            free(payload);
+            return -1;
+        } else {
+            fprintf(stderr, "[ERROR]: Unknown response from server\n");
+            free(payload);
+            return -1;
+        }
+    }
+}
+
+/*
+This function handles, client side, commands requiring the sending of a stream of data in chunks, or the receiving.
+local_fd must be already opened and ready for reading (for upload/write) or writing (for download/read).
+*/
+int run_stream_command(int sockfd, cmd_t *command, int local_fd){
+    // flush to avoid interferences with printf()
+    fflush(stdout);
+
+    if(command->code == CMD_READ || command->code == CMD_DOWNLOAD_BEGIN){
+        // the server answers OK with the number of bytes that will follow
+        char size_payload[64];
+        uint32_t size_len = 0;
+        if(wait_response_payload(sockfd, size_payload, sizeof(size_payload), &size_len) < 0){
+            return -1;
+        }
+
+        int64_t expected_total = -1; // unknown
+        if(size_len > 0){
+            char *end = NULL;
+            errno = 0;
+            long long v = strtoll(size_payload, &end, 10); // convert the payload to a long long integer
+            if(errno == 0 && end != size_payload && v >= 0) expected_total = (int64_t)v; // valid number of bytes expected
+        }
+
+        uint8_t data_code = (command->code == CMD_READ) ? CMD_READ_DATA : CMD_DATA; // distinguish between read and download
+        uint8_t end_code  = (command->code == CMD_READ) ? CMD_READ_END  : CMD_DATA_END;
+
+        char err[256];
+        err[0] = '\0'; 
+        ssize_t received = recv_stream(sockfd, local_fd, -1, expected_total,
+                                      data_code, end_code, err, sizeof(err));
+        if(received < 0){
+            fprintf(stderr, "[ERROR]: transfer failed: %s%s%s\n",
+                    strerror((int)-received), err[0] ? " - " : "", err);
+            return -1;
+        }
+
+        // to avoid interferences with printf() in the main loop, print the number of bytes received in stderr
+        fprintf(stderr, "[Server]: %lld bytes received\n", (long long)received);
+        return 0;
+    }
+
+    if(command->code == CMD_WRITE || command->code == CMD_UPLOAD_BEGIN){
+        // first OK: the server is ready to receive
+        if(wait_response_payload(sockfd, NULL, 0, NULL) < 0){
+            return -1;
+        }
+
+        uint8_t data_code = (command->code == CMD_WRITE) ? CMD_WRITE_DATA : CMD_DATA; // distinguish between write and upload
+        uint8_t end_code  = (command->code == CMD_WRITE) ? CMD_WRITE_END  : CMD_DATA_END;
+
+        ssize_t sent = send_stream(sockfd, local_fd, -1, data_code, end_code);
+        if(sent < 0){
+            fprintf(stderr, "[ERROR]: failed to send the local file: %s\n", strerror((int)-sent));
+            // warn the server that the transfer failed, so it can clean up and not wait for more data
+            send_frame_from(sockfd, NULL, RSP_ERR, 0);
+            wait_response_payload(sockfd, NULL, 0, NULL); // consume the server's response to the error, if any
+            return -1;
+        }
+
+        // second OK: outcome of the write, with the number of bytes written
+        char written[64];
+        uint32_t written_len = 0;
+        if(wait_response_payload(sockfd, written, sizeof(written), &written_len) < 0){
+            return -1;
+        }
+        printf("[Server]: %s bytes written\n", written_len > 0 ? written : "0");
+        fflush(stdout);
+        return 0;
+    }
+
     return -1;
 }
 
@@ -272,21 +413,22 @@ int main(int argc, char *argv[]) {
                 */
 
             char line[MAX_CLIENT_BUFFER];
-            ssize_t bytes_read = read(STDIN_FILENO, line, sizeof(line) - 1);
+            ssize_t bytes_read = read_line(STDIN_FILENO, line, sizeof(line));
             if(bytes_read <= 0) {
-                break; // exit the loop on error
+                break; // EOF or error on stdin
             }
-
-            line[bytes_read] = '\0';
-            line[strcspn(line, "\n")] = '\0'; // remove newline character
 
             // implement commands parsing and handling mechanism
 
             cmd_t command;
 
-            int result = parse_command(line, &command);
+            char error_msg[256];
+            error_msg[0] = '\0'; // initialize error message to empty string
+            uint32_t err_size = sizeof(error_msg);
+
+            int result = parse_command(line, &command, error_msg, err_size);
             if(result < 0) {
-                fprintf(stderr, "Invalid command: %s\n", line);
+                fprintf(stderr, "Failed to parse command: %s\n", error_msg);
                 continue; // continue to next iteration on error
             }
 
@@ -307,11 +449,44 @@ int main(int argc, char *argv[]) {
                 continue; // continue to next iteration to wait for more input or server response
             }
 
+            // boolean condition to check if the command is a stream command (upload/download or read/write)
+            int is_stream = (command.code == CMD_READ || command.code == CMD_WRITE ||
+                             command.code == CMD_UPLOAD_BEGIN || command.code == CMD_DOWNLOAD_BEGIN);
+
+            // open the local file first, to check if it is accessible, before sending the command to the server
+            int local_fd = -1;
+            if(is_stream) {
+                const char *local_name = NULL;
+                if(command.code == CMD_READ) {
+                    local_fd = STDOUT_FILENO;
+                } else if(command.code == CMD_WRITE) {
+                    local_fd = STDIN_FILENO;
+                    fprintf(stderr, "[INFO]: type the content, then press Ctrl-D to end the input\n");
+                } else if(command.code == CMD_UPLOAD_BEGIN) {
+                    local_name = command.buf;  // upload <client path> <server path>
+                    local_fd = open(local_name, O_RDONLY);
+                } else { // CMD_DOWNLOAD_BEGIN: download <server path> <client path>
+                    local_name = command.buf2;
+                    local_fd = open(local_name, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+                }
+
+                if(local_fd < 0) {
+                    fprintf(stderr, "[ERROR]: cannot open the local file '%s': %s\n",
+                            local_name ? local_name : "", strerror(errno));
+                    continue; // the command is not sent to the server if the local file cannot be opened
+                }
+            }
+
             // send the command to the server
             send_packet(socket_fd, command.code, line, strlen(line));
 
-            
-            int rc = wait_response(socket_fd);
+            int rc;
+            if(is_stream) {
+                rc = run_stream_command(socket_fd, &command, local_fd);
+                if(local_fd > STDERR_FILENO) close(local_fd); //  check to avoid closing stdin/stdout/stderr
+            } else {
+                rc = wait_response(socket_fd);
+            }
 
             if(rc == 0 && command.code == CMD_LOGIN) {
                 // if login was successful, store the username for future background operations

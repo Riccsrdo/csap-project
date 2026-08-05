@@ -3,6 +3,8 @@
 - For each connection, we fork() a child, managing that user.
 - For the send() and recv() operations I implemented a mechanism to handle errors like EINTR, which means the operation has been interrupted (maybe due to the fact a SIGCHLD was received during the receival of bytes).
 - I use htons() and htonl() functions for writing to handle endianess, as in normal configurations we may have machines communicating, using different endianess mechanisms. By enforcing the use of these functions for integer values, alongside ntohs and ntohl in reading, I guarantee the correct order in interpreting the value.
+- I implemented a chunking mechanism to send data and receive large portions of data. Read, write, upload and download operations have a command to start sending/receiving data, and one to indicate the end of the process. Given CHUNK_SIZE, I send/receive iterating until the expected amount has finished. 
+- When uploading a file, to avoid overwriting it if the operations has not been completed successfully, I open a temporary file, and only when the server receives END it overwrites the content. Similarly for writing, but only when the offset has not been specified, as I want to avoid truncating the file until all the data has been received.
 
 ## Server
 

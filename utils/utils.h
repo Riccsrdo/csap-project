@@ -7,6 +7,8 @@
 #include<sys/types.h>
 #include<limits.h>
 #include<errno.h>
+#include<unistd.h>
+#include<stdio.h>
 
 #define DEBUG 0
 
@@ -37,5 +39,9 @@ void sb_free(strbuf_t *sb);
 extern gid_t server_gid; // global variable to hold the server's group ID
 
 int validate_permissions(long *perms, char *buf);
+
+int write_all(int fd, const void *buf, ssize_t count);
+
+int open_temp_for_upload(const char *dest_path, char *temp_path_out, size_t out_size);
 
 #endif

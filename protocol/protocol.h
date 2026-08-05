@@ -23,6 +23,6 @@ typedef struct{
 
 
 
-int parse_command(const char *line, cmd_t *command);
+int parse_command(const char *line, cmd_t *command, char *error_msg, uint32_t err_size);
 
 #endif

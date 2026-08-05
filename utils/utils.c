@@ -76,3 +76,63 @@ int validate_permissions(long *perms, char *buf){
     *perms = val;
     return 0;
 }
+
+/*
+Function used to handle writing of large files, it ensures that all bytes are written to the file descriptor, 
+even if write() is interrupted or writes fewer bytes than requested.
+*/
+int write_all(int fd, const void *buf, ssize_t n){
+    // current pointer in the file
+    const char *ptr = buf;
+    // remaining bytes to write
+    ssize_t remaining = n;
+
+    while(remaining > 0){
+        ssize_t written = write(fd, ptr, remaining);
+        if(written < 0){
+            if(errno == EINTR) continue; // interrupted by signal, retry
+            return -errno; // error
+        }
+        ptr += written;
+        remaining -= written;
+    }
+
+    return 0; // success
+}
+
+// create a temporary file in the same directory as dest_path, return its fd
+int open_temp_for_upload(const char *dest_path, char *temp_path_out, size_t out_size){
+    if(dest_path == NULL || temp_path_out == NULL || out_size == 0){
+        return -EINVAL; // the caller must provide a buffer to receive the temporary name
+    }
+
+    const char *dir_end = strrchr(dest_path, '/');
+    if(dir_end == NULL){
+        return -EINVAL; // invalid path
+    }
+
+    size_t dir_len = dir_end - dest_path + 1; // +1 for the '/' character
+    char *dir_path = malloc(dir_len + 1);
+    if(dir_path == NULL){
+        return -ENOMEM;
+    }
+    strncpy(dir_path, dest_path, dir_len);
+    dir_path[dir_len] = '\0';
+
+    char temp_template[PATH_MAX];
+    snprintf(temp_template, sizeof(temp_template), "%s.tempXXXXXX", dir_path);
+    free(dir_path);
+
+    // verify that the generated temp_template fits in temp_path_out
+    if(strlen(temp_template) >= out_size){
+        return -ENAMETOOLONG;
+    }
+    strncpy(temp_path_out, temp_template, out_size);
+
+    int temp_fd = mkstemp(temp_path_out);
+    if(temp_fd < 0){
+        return -errno;
+    }
+
+    return temp_fd;
+}

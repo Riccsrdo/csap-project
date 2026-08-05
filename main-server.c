@@ -30,6 +30,7 @@ Responsible for:
 #include<sys/stat.h>
 #include<limits.h>
 #include"session/session.h"
+#include"transfer/transfer.h"
 
 #define MAX_CLIENT_BUFFER 1024
 
@@ -127,9 +128,11 @@ void configure_read_set(fd_set *readfds, int socket_fd) {
 
 
 void dispatch(session_t *session, int clientSocket, uint8_t command, void *payload, uint32_t payload_len) {
+    (void)payload_len; // suppress warning
     
     char error_msg[256];
     error_msg[0] = '\0'; // initialize error message to empty string
+    uint32_t err_size = sizeof(error_msg);
 
     // Commands without login
     if(command == CMD_LOGIN) {
@@ -137,9 +140,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         // parse payload to extract username
         cmd_t login_command;
         login_command.code = CMD_LOGIN;
-        if(parse_command(payload, &login_command) < 0) {
-            const char *reason = "Failed to parse command";
-            send_err(clientSocket, EINVAL, reason);
+        if(parse_command(payload, &login_command, error_msg, err_size) < 0) {
+            send_err(clientSocket, EINVAL, error_msg);
             return;
         }
 
@@ -179,9 +181,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
     if(command == CMD_CREATE_USER) {
     
         cmd_t cu_command;
-        if(parse_command(payload, &cu_command) < 0) {
-            const char *reason = "Failed to parse command";
-            send_err(clientSocket, EINVAL, reason);
+        if(parse_command(payload, &cu_command, error_msg, err_size) < 0) {
+            send_err(clientSocket, EINVAL, error_msg);
             return;
         }
 
@@ -202,8 +203,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         uint32_t err_size = sizeof(error_msg);
         int result = handle_create_user(cu_command.buf, perms, session->root_path, error_msg, err_size);
         // check if err_message is not empty, if so send it to the client
-        if(strlen(error_msg) > 0) {
-            send_err(clientSocket, EACCES, error_msg);
+        if(result < 0) {
+            send_err(clientSocket, EACCES, error_msg[0] ? error_msg : "Failed to create user");
         } else {
             // send success response to client
             send_ok(clientSocket, NULL, 0);
@@ -230,9 +231,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
     switch(command){
         case(CMD_CREATE): {
             cmd_t create_command;
-            if(parse_command(payload, &create_command) < 0) {
-                const char *reason = "Failed to parse command";
-                send_err(clientSocket, EINVAL, reason);
+            if(parse_command(payload, &create_command, error_msg, err_size) < 0) {
+                send_err(clientSocket, EINVAL, error_msg);
                 return;
             }
 
@@ -268,9 +268,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         case(CMD_CHMOD): {
 
             cmd_t chmod_command;
-            if(parse_command(payload, &chmod_command) < 0) {
-                const char *reason = "Failed to parse command";
-                send_err(clientSocket, EINVAL, reason);
+            if(parse_command(payload, &chmod_command, error_msg, err_size) < 0) {
+                send_err(clientSocket, EINVAL, error_msg);
                 return;
             }
 
@@ -305,9 +304,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         }
         case(CMD_MOVE): {
             cmd_t move_command;
-            if(parse_command(payload, &move_command) < 0) {
-                const char *reason = "Failed to parse command";
-                send_err(clientSocket, EINVAL, reason);
+            if(parse_command(payload, &move_command, error_msg, err_size) < 0) {
+                send_err(clientSocket, EINVAL, error_msg);
                 return;
             }
 
@@ -341,17 +339,10 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
 
             break;
         }
-        case(CMD_UPLOAD_BEGIN): {
-            break;
-        }
-        case(CMD_DOWNLOAD_BEGIN): {
-            break;
-        }
         case(CMD_CD): {
             cmd_t cd_command;
-            if(parse_command(payload, &cd_command) < 0) {
-                const char *reason = "Failed to parse command";
-                send_err(clientSocket, EINVAL, reason);
+            if(parse_command(payload, &cd_command, error_msg, err_size) < 0) {
+                send_err(clientSocket, EINVAL, error_msg);
                 return;
             }
 
@@ -376,17 +367,331 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
 
             break;
         }
+        case(CMD_DOWNLOAD_BEGIN): {
+            cmd_t download_command;
+            if(parse_command(payload, &download_command, error_msg, err_size) < 0) {
+                send_err(clientSocket, EINVAL, error_msg);
+                return;
+            }
+
+            // validate path against home_path, if not valid return error
+            char full_path[PATH_MAX];
+            int r = validate_path(download_command.buf, session->home_path, full_path);
+            if(r < 0) {
+                const char *reason = "Path outside of allowed scope";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            // open file contained in validated path
+            int file_fd = open(full_path, O_RDONLY);
+            if(file_fd < 0) {
+                const char *reason = "Failed to open file";
+                send_err(clientSocket, -errno, reason);
+                return;
+            }
+
+            // TODO: lock
+
+            // obtain info about file
+            struct stat file_stat;
+            if(fstat(file_fd, &file_stat) < 0) {
+                const char *reason = "Failed to get file info";
+                send_err(clientSocket, -errno, reason);
+                close(file_fd);
+                return;
+            }
+
+            // compute file size
+            uint64_t file_size = (uint64_t)file_stat.st_size;
+
+            // send an initial OK to client to indicate that the download operation is starting, with the size of the file as payload
+            char size_payload[32];
+            int size_payload_len = snprintf(size_payload, sizeof(size_payload), "%llu", (unsigned long long)file_size);
+            send_ok(clientSocket, size_payload, size_payload_len);
+
+            uint8_t data_code = CMD_DATA;
+            uint8_t end_code = CMD_DATA_END;
+
+            // send the file stream to the client
+            ssize_t stream_result = send_stream(clientSocket, file_fd, 0, data_code, end_code);
+
+            // close descriptor
+            close(file_fd);
+
+            if(stream_result < 0) {
+                const char *reason = "Failed to send file stream";
+                send_err(clientSocket, (int)-stream_result, reason);
+                return;
+            }
+            break;
+        }
         case(CMD_READ): {
+            cmd_t read_command;
+            if(parse_command(payload, &read_command, error_msg, err_size) < 0) {
+                send_err(clientSocket, EINVAL, error_msg);
+                return;
+            }
+
+            if(read_command.offset < 0){
+                read_command.offset = 0; // default offset to 0
+            }
+
+            // validate path against home_path, if not valid return error
+            char full_path[PATH_MAX];
+            int r = validate_path(read_command.buf, session->home_path, full_path);
+            if(r < 0) {
+                const char *reason = "Path outside of allowed scope";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            // open file contained in validated path
+            int file_fd = open(full_path, O_RDONLY);
+            if(file_fd < 0) {
+                const char *reason = "Failed to open file";
+                send_err(clientSocket, -errno, reason);
+                return;
+            }
+
+            // TODO: lock with fnctl() to prevent concurrent reads/writes
+
+            // obtain info about file
+            struct stat file_stat;
+            if(fstat(file_fd, &file_stat) < 0) {
+                const char *reason = "Failed to get file info";
+                send_err(clientSocket, -errno, reason);
+                close(file_fd);
+                return;
+            }
+
+            // compute file size
+            uint64_t file_size = (uint64_t)file_stat.st_size;
+
+            // obtain offset from read_command
+            off_t offset = (off_t)read_command.offset;
+            // determine amount of bytes to send, size - offset, if offset is greater than size, send 0 bytes
+            uint64_t bytes_to_send = 0;
+            if(file_size > (uint64_t)offset) {
+                bytes_to_send = file_size - (uint64_t)offset;
+            }
+
+            // send OK to client, indicating that the read operation is starting, with the size of the data to be sent as payload
+            // size is computed removing the offset from the total size of the file, so client can detect truncated answer
+            char size_payload[32];
+            int size_payload_len = snprintf(size_payload, sizeof(size_payload), "%llu", (unsigned long long)bytes_to_send);
+            send_ok(clientSocket, size_payload, size_payload_len);
+
+            uint8_t data_code = CMD_READ_DATA;
+            uint8_t end_code = CMD_READ_END;
+
+            // send the file stream to the client
+            ssize_t stream_result = send_stream(clientSocket, file_fd, offset, data_code, end_code);
+
+            // release lock
+
+            // close descriptor
+            close(file_fd);
+
+            if(stream_result < 0) {
+                const char *reason = "Failed to send file stream";
+                send_err(clientSocket, (int)-stream_result, reason);
+                return;
+            }
+            
+            break;
+        }
+        case(CMD_UPLOAD_BEGIN): {
+            cmd_t upload_command;
+            if(parse_command(payload, &upload_command, error_msg, err_size) < 0) {
+                send_err(clientSocket, EINVAL, error_msg);
+                return;
+            }
+
+            // validate path against home_path, if not valid return error
+            char full_path[PATH_MAX];
+            int r = validate_path(upload_command.buf2, session->home_path, full_path);
+            if(r < 0) {
+                const char *reason = "Path outside of allowed scope";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            
+            mode_t dest_mode = 0700; // default permissions for file
+            struct stat dest_stat;
+            if(stat(full_path, &dest_stat) == 0) {
+                dest_mode = dest_stat.st_mode & 07777; // retrieve permissions of existing file
+            } // I obtain permissions as mkstemp() creates temp file with 0600 permissions, and after succesful upload I restore the permissions of dest. file
+
+            // write in a temp file until successful upload, then rename it, avoiding problems due to crashes
+            char temp_path[PATH_MAX];
+            temp_path[0] = '\0';
+            int file_fd = open_temp_for_upload(full_path, temp_path, sizeof(temp_path));
+            if(file_fd < 0) {
+                const char *reason = "Failed to open temporary file for upload";
+                send_err(clientSocket, -file_fd, reason);
+                return;
+            }
+
+            // lock
+
+            // tell client to start sending data
+            const char *reason = "Ready to receive data";
+            send_ok(clientSocket, reason, strlen(reason));
+
+            // start receiving stream
+            uint8_t data_code = CMD_DATA;
+            uint8_t end_code = CMD_DATA_END;
+
+            // offset -1: never seek, the temporary file is empty
+            ssize_t stream_result = recv_stream(clientSocket, file_fd, -1, -1, data_code, end_code, error_msg, err_size);
+            if(stream_result < 0) {
+                close(file_fd);
+                unlink(temp_path); // remove temporary file if upload failed
+                send_err(clientSocket, (int)-stream_result,
+                         error_msg[0] ? error_msg : "Failed to receive file stream");
+                return;
+            }
+
+            // restore the permissions of the destination on the temporary file
+            if(fchmod(file_fd, dest_mode) < 0) {
+                int saved = errno;
+                close(file_fd);
+                unlink(temp_path);
+                send_err(clientSocket, saved, "Failed to set permissions on uploaded file");
+                return;
+            }
+
+            if(close(file_fd) < 0) {
+                int saved = errno;
+                unlink(temp_path);
+                send_err(clientSocket, saved, "Failed to close temporary file");
+                return;
+            }
+
+            // update final dest
+            if(rename(temp_path, full_path) < 0) {
+                int saved = errno;
+                unlink(temp_path);
+                send_err(clientSocket, saved, "Failed to install uploaded file");
+                return;
+            }
+
+            // unlock
+
+            // send confirmation with N bytes written
+            char bytes_written_payload[32];
+            int bytes_written_payload_len = snprintf(bytes_written_payload, sizeof(bytes_written_payload), "%lld", (long long)stream_result);
+            send_ok(clientSocket, bytes_written_payload, bytes_written_payload_len);
             break;
         }
         case(CMD_WRITE): {
+            cmd_t write_command;
+            if(parse_command(payload, &write_command, error_msg, err_size) < 0) {
+                send_err(clientSocket, EINVAL, error_msg);
+                return;
+            }
+
+            // validate path against home_path, if not valid return error
+            char full_path[PATH_MAX];
+            int r = validate_path(write_command.buf, session->home_path, full_path);
+            if(r < 0) {
+                const char *reason = "Path outside of allowed scope";
+                send_err(clientSocket, EINVAL, reason);
+                return;
+            }
+
+            // open file contained in validated path
+            off_t offset = (off_t)write_command.offset;
+
+            // save permissions (like in upload) to restore them after writing, as the file may be truncated
+            mode_t dest_mode = 0700; // default permissions
+            struct stat dest_stat;
+            if(stat(full_path, &dest_stat) == 0) {
+                dest_mode = dest_stat.st_mode & 07777;
+            }
+
+            // with specified offset, open file in write mode with O_CREAT and 0700 permissions, otherwise open in truncate mode (O_TRUNC)
+            char temp_path[PATH_MAX];
+            temp_path[0] = '\0';
+            int file_fd;
+            if(offset >= 0) {
+                file_fd = open(full_path, O_WRONLY | O_CREAT, 0700);
+                if(file_fd < 0) {
+                    const char *reason = "Failed to open file for writing";
+                    send_err(clientSocket, errno, reason);
+                    return;
+                }
+            } else {
+                // open with temporary file to avoid truncating the original file until the write is complete
+                file_fd = open_temp_for_upload(full_path, temp_path, sizeof(temp_path));
+                if(file_fd < 0) {
+                    const char *reason = "Failed to open temporary file for writing";
+                    send_err(clientSocket, -file_fd, reason);
+                    return;
+                }
+            }
+
+            // set lock
+
+            // tell client to start sending data
+            const char *reason = "Ready to receive data";
+            send_ok(clientSocket, reason, strlen(reason));
+
+            // start receiving stream
+            uint8_t data_code = CMD_WRITE_DATA;
+            uint8_t end_code = CMD_WRITE_END;
+
+            ssize_t stream_result = recv_stream(clientSocket, file_fd, offset, -1, data_code, end_code, error_msg, err_size);
+            if(stream_result < 0) {
+                close(file_fd);
+                if(temp_path[0] != '\0') {
+                    unlink(temp_path); // remove temp file
+                }
+                send_err(clientSocket, (int)-stream_result,
+                         error_msg[0] ? error_msg : "Failed to receive file stream");
+                return;
+            }
+
+            if(temp_path[0] != '\0') { // if a temporary file was used
+                // restore the permissions of the destination and commit to effective file
+                if(fchmod(file_fd, dest_mode) < 0) {
+                    int saved = errno;
+                    close(file_fd);
+                    unlink(temp_path);
+                    send_err(clientSocket, saved, "Failed to set permissions on written file");
+                    return;
+                }
+                if(close(file_fd) < 0) {
+                    int saved = errno;
+                    unlink(temp_path);
+                    send_err(clientSocket, saved, "Failed to close temporary file");
+                    return;
+                }
+                if(rename(temp_path, full_path) < 0) {
+                    int saved = errno;
+                    unlink(temp_path);
+                    send_err(clientSocket, saved, "Failed to install written file");
+                    return;
+                }
+            } else {
+                close(file_fd);
+            }
+
+            // release lock
+
+            // send confirmation with N bytes written
+            char bytes_written_payload[32];
+            int bytes_written_payload_len = snprintf(bytes_written_payload, sizeof(bytes_written_payload), "%lld", (long long)stream_result);
+            send_ok(clientSocket, bytes_written_payload, bytes_written_payload_len);
+
             break;
         }
         case(CMD_DELETE): {
             cmd_t delete_command;
-            if(parse_command(payload, &delete_command) < 0) {
-                const char *reason = "Failed to parse command";
-                send_err(clientSocket, EINVAL, reason);
+            if(parse_command(payload, &delete_command, error_msg, err_size) < 0) {
+                send_err(clientSocket, EINVAL, error_msg);
                 return;
             }
 
@@ -413,9 +718,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         case(CMD_LIST): {
             // tokenize payload with parse_command()
             cmd_t list_command;
-            if(parse_command(payload, &list_command) < 0) {
-                const char *reason = "Failed to parse command";
-                send_err(clientSocket, EINVAL, reason);
+            if(parse_command(payload, &list_command, error_msg, err_size) < 0) {
+                send_err(clientSocket, EINVAL, error_msg);
                 return;
             }
 

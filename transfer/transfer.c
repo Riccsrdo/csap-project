@@ -32,18 +32,18 @@ ssize_t send_stream(int sockfd, int fd, off_t offset, uint8_t data_code, uint8_t
         }
 
         // send the data frame
-        int ret = send_frame_from(sockfd, buffer + HDR_SIZE, data_code, bytes_read);
+        int ret = send_packet(sockfd, data_code, buffer + HDR_SIZE, (uint32_t)bytes_read);
 
         if(ret < 0){
-            return ret;
+            return -EIO;
         }
         total_bytes_sent += bytes_read;
     }
 
     // send a frame with end_code and no payload to indicate the end of the stream
-    int ret = send_frame_from(sockfd, NULL, end_code, 0);
+    int ret = send_packet(sockfd, end_code, NULL, 0);
     if(ret < 0){
-        return ret;
+        return -EIO;
     }
 
     return total_bytes_sent;

@@ -118,76 +118,8 @@ int configure_read_set(fd_set *readfds, int socket_fd, int pipe_fd) {
     
 }
 
-/*
-Function used to read one line from stdin or socket, byte by byte.
-*/
-ssize_t read_line(int fd, char *buf, size_t size){
-    size_t i = 0;
-    while(i + 1 < size){
-        char c;
-        ssize_t n = read(fd, &c, 1);
-        if(n < 0){
-            if(errno == EINTR) continue; // interrupted by a signal, retry
-            return -1;
-        }
-        if(n == 0) break;    // EOF
-        if(c == '\n') break; // end of the command, the newline is consumed
-        buf[i++] = c;
-    }
-    buf[i] = '\0';
-    return (ssize_t)i;
-}
 
-// Waits for a response from the server, handling asynchronous notifications, printing them to stdout
-int wait_response(int fd){
-    for(;;){
-        uint8_t command;
-        char *payload = NULL;
-        uint32_t payload_len;
-
-        if(recv_packet(fd, (char **)&payload, &command, &payload_len) < 0) {
-            fprintf(stderr, "Error receiving packet from server\n");
-            free(payload);
-            return -1;
-        }
-
-        #if DEBUG
-        printf("[DEBUG]: Received command: %d, payload content: %s\n", command, (char*)payload);
-        #endif
-
-        // print, based on error code/success code, related message to stdout
-        if(command == RSP_NOTIFY){
-            printf("[NOTIFY]: %s \n", (char *)payload);
-            free(payload);
-            continue; // continue to wait for the actual response
-        } else if(command == RSP_OK) {
-            // check if payload is empty, if yes, print a default message, otherwise print the payload
-            if(payload_len == 0 || payload == NULL) {
-                printf("[Server]: OK\n");
-            } else {
-                printf("[Server]: \n%s \n", (char *)payload);
-            }
-            free(payload);
-            return 0; // success
-        } else if(command == RSP_ERR) {
-            int code; char msg[256];
-            if (sscanf(payload, "%d %255[^\n]", &code, msg) == 2)
-                fprintf(stderr, "[ERROR]: %s (%s)\n", msg, strerror(code));
-            free(payload);
-            return -1; // error
-        } else {
-            fprintf(stderr, "[ERROR]: Unknown response from server\n");
-            free(payload);
-            return -1; // unknown response
-        }
-    }
-
-    // should not reach here
-    return -1;
-}
-
-
-int wait_response_payload(int fd, char *out, size_t out_size, uint32_t *out_len){
+int recv_response(int fd, char *out, size_t out_size, uint32_t *out_len, int print_ok){
     if(out && out_size > 0) out[0] = '\0';
     if(out_len) *out_len = 0;
 
@@ -202,6 +134,10 @@ int wait_response_payload(int fd, char *out, size_t out_size, uint32_t *out_len)
             free(payload);
             return -1;
         }
+
+        #if DEBUG
+        printf("[DEBUG]: Received command: %d, payload content: %s\n", command, (char*)payload);
+        #endif
 
         if(command == RSP_NOTIFY){ // if it's a notification, print it to stdout and continue waiting for the actual response
             printf("[NOTIFY]: %s \n", (char *)payload);
@@ -232,6 +168,11 @@ int wait_response_payload(int fd, char *out, size_t out_size, uint32_t *out_len)
     }
 }
 
+int wait_response(int fd){
+    return recv_response(fd, NULL, 0, NULL, 0);
+}
+
+
 /*
 This function handles, client side, commands requiring the sending of a stream of data in chunks, or the receiving.
 local_fd must be already opened and ready for reading (for upload/write) or writing (for download/read).
@@ -244,7 +185,7 @@ int run_stream_command(int sockfd, cmd_t *command, int local_fd){
         // the server answers OK with the number of bytes that will follow
         char size_payload[64];
         uint32_t size_len = 0;
-        if(wait_response_payload(sockfd, size_payload, sizeof(size_payload), &size_len) < 0){
+        if(recv_response(sockfd, size_payload, sizeof(size_payload), &size_len, 0) < 0){
             return -1;
         }
 
@@ -276,7 +217,7 @@ int run_stream_command(int sockfd, cmd_t *command, int local_fd){
 
     if(command->code == CMD_WRITE || command->code == CMD_UPLOAD_BEGIN){
         // first OK: the server is ready to receive
-        if(wait_response_payload(sockfd, NULL, 0, NULL) < 0){
+        if(recv_response(sockfd, NULL, 0, NULL, 0) < 0){
             return -1;
         }
 
@@ -288,14 +229,14 @@ int run_stream_command(int sockfd, cmd_t *command, int local_fd){
             fprintf(stderr, "[ERROR]: failed to send the local file: %s\n", strerror((int)-sent));
             // warn the server that the transfer failed, so it can clean up and not wait for more data
             send_frame_from(sockfd, NULL, RSP_ERR, 0);
-            wait_response_payload(sockfd, NULL, 0, NULL); // consume the server's response to the error, if any
+            recv_response(sockfd, NULL, 0, NULL, 0); // consume the server's response to the error, if any
             return -1;
         }
 
         // second OK: outcome of the write, with the number of bytes written
         char written[64];
         uint32_t written_len = 0;
-        if(wait_response_payload(sockfd, written, sizeof(written), &written_len) < 0){
+        if(recv_response(sockfd, written, sizeof(written), &written_len, 0) < 0){
             return -1;
         }
         printf("[Server]: %s bytes written\n", written_len > 0 ? written : "0");

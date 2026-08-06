@@ -90,7 +90,7 @@ int send_packet(int sockfd, uint8_t command, const char *payload, uint32_t paylo
     return ret;
 }
 
-int recv_packet(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len){
+int recv_header(int sockfd, uint8_t *command, uint32_t *payload_len){
     uint16_t preamble;
     if(receive_data(sockfd, &preamble, sizeof(preamble)) < 0){
         return -1;
@@ -99,7 +99,7 @@ int recv_packet(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len){
     if(preamble != PREAMBLE){
         return -1;
     }
-    if(receive_data(sockfd, status, sizeof(*status)) < 0){
+    if(receive_data(sockfd, command, sizeof(*command)) < 0){
         return -1;
     }
     if(receive_data(sockfd, payload_len, sizeof(*payload_len)) < 0){
@@ -109,14 +109,25 @@ int recv_packet(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len){
     if(*payload_len > MAX_PAYLOAD_SIZE){ // check if payload_len is corrupted or too large
         return -1;
     }
-    *buf = malloc(*payload_len +1); // allocate memory for the payload, +1 for null terminator
-    if(*buf == NULL){
+    return 0;
+}
+
+int recv_packet(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len){
+    if(recv_header(sockfd, status, payload_len) < 0){
         return -1;
     }
-    (*buf)[*payload_len] = '\0'; // null terminate the payload
-    if(receive_data(sockfd, *buf, *payload_len) < 0){
-        free(*buf);
-        return -1;
+    if(*payload_len > 0){
+        *buf = malloc(*payload_len + 1); // +1 for null terminator
+        if(*buf == NULL){
+            return -1;
+        }
+        if(receive_data(sockfd, *buf, *payload_len) < 0){
+            free(*buf);
+            return -1;
+        }
+        (*buf)[*payload_len] = '\0'; // null terminate the payload
+    } else {
+        *buf = NULL; // no payload
     }
     return 0;
 }
@@ -138,62 +149,19 @@ int send_err(int fd, int err_code, const char *payload){
 }
 
 int recv_frame_into(int sockfd, void *buf, size_t buf_cap, uint8_t *status, uint32_t *payload_len){
-    uint16_t preamble;
-    if(receive_data(sockfd, &preamble, sizeof(preamble))<0){
-        return -EIO;
+    if(recv_header(sockfd, status, payload_len) < 0){
+        return -1;
     }
-    preamble = ntohs(preamble);
-    if(preamble != PREAMBLE){
-        return -EINVAL;
-    }
-    // receive status
-    if(receive_data(sockfd, status, sizeof(*status))<0){
-        return -EIO;
-    }
-    // receive payload length
-    if(receive_data(sockfd, payload_len, sizeof(*payload_len))<0){
-        return -EIO;
-    }
-    *payload_len = ntohl(*payload_len);
-    if(*payload_len > MAX_PAYLOAD_SIZE || *payload_len > buf_cap){
-        return -EINVAL;
+
+    if(*payload_len > buf_cap){
+        return -1; // buffer too small
     }
 
     if(*payload_len > 0){
-        // receive payload into buf, without using recv_data()
-        int r = receive_data(sockfd, buf, *payload_len);
-        if(r < 0){
-            return -EIO;
+        if(receive_data(sockfd, buf, *payload_len) < 0){
+            return -1;
         }
     }
     return 0;
 
-}
-
-int send_frame_from(int sockfd, void *buf, uint8_t status, uint32_t payload_len){
-    if(payload_len > CHUNK_SIZE){
-        return -EINVAL;
-    }
-
-    char packet[HDR_SIZE + CHUNK_SIZE];
-
-    // build header
-    uint16_t preamble = htons(PREAMBLE);
-    memcpy(packet, &preamble, sizeof(preamble));
-    memcpy(packet + sizeof(preamble), &status, sizeof(status));
-    uint32_t payload_len_network = htonl(payload_len);
-    memcpy(packet + sizeof(preamble) + sizeof(status), &payload_len_network, sizeof(payload_len_network));
-
-    if(buf == NULL && payload_len == 0){
-        // final frame, just send the header with no payload
-        int r = send_data(sockfd, packet, HDR_SIZE);
-        return r;
-    }
-
-    // embed buf into packet
-    memcpy(packet + HDR_SIZE, buf, payload_len);
-
-    // send packet
-    int r = send_data(sockfd, packet, HDR_SIZE + payload_len);
-    return r;
 }

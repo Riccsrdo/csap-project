@@ -44,4 +44,6 @@ int write_all(int fd, const void *buf, ssize_t count);
 
 int open_temp_for_upload(const char *dest_path, char *temp_path_out, size_t out_size);
 
+ssize_t read_line(int fd, char *buf, size_t size);
+
 #endif

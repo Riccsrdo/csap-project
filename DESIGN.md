@@ -5,6 +5,7 @@
 - I use htons() and htonl() functions for writing to handle endianess, as in normal configurations we may have machines communicating, using different endianess mechanisms. By enforcing the use of these functions for integer values, alongside ntohs and ntohl in reading, I guarantee the correct order in interpreting the value.
 - I implemented a chunking mechanism to send data and receive large portions of data. Read, write, upload and download operations have a command to start sending/receiving data, and one to indicate the end of the process. Given CHUNK_SIZE, I send/receive iterating until the expected amount has finished. 
 - When uploading a file, to avoid overwriting it if the operations has not been completed successfully, I open a temporary file, and only when the server receives END it overwrites the content. Similarly for writing, but only when the offset has not been specified, as I want to avoid truncating the file until all the data has been received.
+- For the locking mechanism, I decided to use non-blocking locks, as I don't want other clients to remain hanging while waiting. I simply notify them about the inability of locking a file, at that time.
 
 ## Server
 
@@ -21,6 +22,17 @@
 
 ## Commands
 
+### CD
+I use chdir() when performing a cd operation, as the kernel maintains the current working directory.
+
 ### List
 For list, to capture stats about files, I decided to use `lstat` instead of the `stat` function, as the latter resolves the link to the linked file, potentially allowing users to escape the sandboxed environment, while `lstat` returns metadata of the actual soft link.
 
+### Delete
+For the locking mechanism, I decided to apply the lock to the parent directory. When I call `unlink()` on the file, the entry is removed from the directory in which the file is contained. If another client tries, in the meanwhile, to create a file with the same name, he will be able to do so.
+Both the client deleting the file, and the client opening the file, will believe they have full control over the file, while in reality they're working with two different inodes (race condition). By locking parent directory, I stop every other client trying to modify of create the file to do so, while the other client is performing the `unlink()`.
+
+### Move
+For the locking mechanism, to avoid a deadlock due to the lock of the source dir and destination dir, I decided to:
+- Obtain a write lock on the source file, ensuring no one is performing operations on it.
+- If the destination file already exists, I acquire a lock on that as well, avoiding the fact other clients might be perfoming operations on it.

@@ -16,20 +16,14 @@ Takes as parameters:
 Returns 0 on success, or a negative error code on failure.
 */
 static int set_lock(int fd, int type, int cmd, off_t offset, off_t len) {
-    struct flock lock;
+    struct flock lock = {0}; 
     lock.l_type = type; // F_RDLCK, F_WRLCK, F_UNLCK
     lock.l_whence = SEEK_SET; // relative to the start of the file
     lock.l_start = offset; // starting offset for the lock
     lock.l_len = len; // length of the locked region
 
     if(fcntl(fd, cmd, &lock) == -1) {
-        if(errno == EACCES || errno == EAGAIN) {
-            // the file is already locked by another process
-            return -errno; // return the error code to the caller
-        } else {
-            perror("fcntl");
-            return -1; // return a generic error code to the caller
-        }
+        return -errno; // return negative error code
     }
     return 0;
 }

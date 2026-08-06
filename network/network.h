@@ -46,6 +46,5 @@ int send_ok(int fd, const char *payload, uint32_t payload_len);
 int send_err(int fd, int err_code, const char *payload);
 
 int recv_frame_into(int sockfd, void *buf, size_t buf_cap, uint8_t *status, uint32_t *payload_len);
-int send_frame_from(int sockfd, void *buf, uint8_t status, uint32_t payload_len);
 
 #endif

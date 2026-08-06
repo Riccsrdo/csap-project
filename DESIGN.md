@@ -28,10 +28,6 @@ I use chdir() when performing a cd operation, as the kernel maintains the curren
 ### List
 For list, to capture stats about files, I decided to use `lstat` instead of the `stat` function, as the latter resolves the link to the linked file, potentially allowing users to escape the sandboxed environment, while `lstat` returns metadata of the actual soft link.
 
-### Delete
-For the locking mechanism, I decided to apply the lock to the parent directory. When I call `unlink()` on the file, the entry is removed from the directory in which the file is contained. If another client tries, in the meanwhile, to create a file with the same name, he will be able to do so.
-Both the client deleting the file, and the client opening the file, will believe they have full control over the file, while in reality they're working with two different inodes (race condition). By locking parent directory, I stop every other client trying to modify of create the file to do so, while the other client is performing the `unlink()`.
-
 ### Move
 For the locking mechanism, to avoid a deadlock due to the lock of the source dir and destination dir, I decided to:
 - Obtain a write lock on the source file, ensuring no one is performing operations on it.

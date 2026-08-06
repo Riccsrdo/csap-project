@@ -1,8 +1,8 @@
 CC := gcc
-CFLAGS := -std=gnu11 -D_GNU_SOURCE -Wall -Wextra -g -I. -Iutils -Inetwork -Iprotocol -Ifsops -Ipaths -Isession -Itransfer
+CFLAGS := -std=gnu11 -D_GNU_SOURCE -Wall -Wextra -g -I. -Iutils -Inetwork -Iprotocol -Ifsops -Ipaths -Isession -Itransfer -Ilocks
 
 ## add here all the source files that need to be compiled
-SRCS   := utils/utils.c network/network.c protocol/protocol.c fsops/fsops.c paths/paths.c session/session.c transfer/transfer.c
+SRCS   := utils/utils.c network/network.c protocol/protocol.c fsops/fsops.c paths/paths.c session/session.c transfer/transfer.c locks/locks.c
 
 # all headers
 HDRS := $(wildcard */*.h)

@@ -150,6 +150,15 @@ int recv_response(int fd, char *out, size_t out_size, uint32_t *out_len, int pri
                 out[n] = '\0';
             }
             if(out_len) *out_len = payload_len;
+            //if print ok
+            if(print_ok){
+                if(payload_len == 0 || payload == NULL) {
+                    printf("[Server]: OK\n");
+                } else {
+                    printf("[Server]: \n%s \n", (char *)payload);
+                }
+                fflush(stdout);
+            }
             free(payload);
             return 0;
         } else if(command == RSP_ERR) {
@@ -169,7 +178,7 @@ int recv_response(int fd, char *out, size_t out_size, uint32_t *out_len, int pri
 }
 
 int wait_response(int fd){
-    return recv_response(fd, NULL, 0, NULL, 0);
+    return recv_response(fd, NULL, 0, NULL, 1);
 }
 
 
@@ -228,7 +237,7 @@ int run_stream_command(int sockfd, cmd_t *command, int local_fd){
         if(sent < 0){
             fprintf(stderr, "[ERROR]: failed to send the local file: %s\n", strerror((int)-sent));
             // warn the server that the transfer failed, so it can clean up and not wait for more data
-            send_frame_from(sockfd, NULL, RSP_ERR, 0);
+            send_packet(sockfd, RSP_ERR, NULL, 0);
             recv_response(sockfd, NULL, 0, NULL, 0); // consume the server's response to the error, if any
             return -1;
         }
@@ -247,8 +256,50 @@ int run_stream_command(int sockfd, cmd_t *command, int local_fd){
     return -1;
 }
 
-void spawn_background(cmd_t *command, int* pipe_fd, int socket_fd) {
-    (void)command;
+// helper function to compute the local file descriptor based on the command type
+int compute_local_fd(cmd_t *command, int *local_fd) {
+    const char *local_name = NULL;
+    if(command->code == CMD_READ) {
+        *local_fd = STDOUT_FILENO;
+    } else if(command->code == CMD_WRITE) {
+        *local_fd = STDIN_FILENO;
+        fprintf(stderr, "[INFO]: type the content, then press Ctrl-D to end the input\n");
+    } else if(command->code == CMD_UPLOAD_BEGIN) {
+        local_name = command->buf;  // upload <client path> <server path>
+        *local_fd = open(local_name, O_RDONLY);
+    } else { // CMD_DOWNLOAD_BEGIN: download <server path> <client path>
+        local_name = command->buf2;
+        *local_fd = open(local_name, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    }
+
+    if(*local_fd < 0) {
+        fprintf(stderr, "[ERROR]: cannot open the local file '%s': %s\n",
+                local_name ? local_name : "", strerror(errno));
+        return -1; // the command is not sent to the server if the local file cannot be opened
+    }
+    return 0;
+}
+
+/*
+Helper function to notify the parent process about the termination of a child process handling a background operation.
+*/
+void bg_end_notify(int pipe_write_fd, int socket_fd, int exit_code, const char *msg) {
+    if (msg != NULL) {
+        // write message on pipe to notify the parent process about the termination of the child process
+        write(pipe_write_fd, msg, strlen(msg));
+    } else {
+        // Used when msg is NULL, to still allow the decrementing of the background_operations counter in the parent process
+        write(pipe_write_fd, "Background operation terminated.\n", 33);
+    }
+
+    if (socket_fd >= 0) {
+        close(socket_fd);
+    }
+    _exit(exit_code);
+}
+
+
+void spawn_background(cmd_t *command, const char *line, int* pipe_fd, int socket_fd) {
     fflush(NULL);
     pid_t pid = fork();
     if(pid == 0){
@@ -262,19 +313,41 @@ void spawn_background(cmd_t *command, int* pipe_fd, int socket_fd) {
         // concatenate "login [username]" to the payload
         snprintf(payload, sizeof(payload), "login %s", username);
         send_packet(bg_socket_fd, CMD_LOGIN, payload, strlen(payload));
-        if(wait_response(bg_socket_fd) < 0) {
-            fprintf(stderr, "[ERROR]: Background operation failed to authenticate with server.\n");
-            close(bg_socket_fd);
-            _exit(EXIT_FAILURE);
+
+        // wait for the server's response to the login command
+        if(recv_response(bg_socket_fd, NULL, 0, NULL, 0) < 0) {
+            bg_end_notify(pipe_fd[1], bg_socket_fd, EXIT_FAILURE,
+                "[ERROR]: Background login failed.\n");
         }
 
         // upload content/download content
-        // function()
+        int fd = -1;
 
-        char *msg = "Background operation completed.\n";
-        write(pipe_fd[1], msg, strlen(msg)); // write to the pipe to notify the parent
-        close(bg_socket_fd);
-        _exit(EXIT_SUCCESS);
+        int r = compute_local_fd(command, &fd);
+        if(r < 0) {
+            bg_end_notify(pipe_fd[1], bg_socket_fd, EXIT_FAILURE,
+                "Background operation failed to open local file.\n");
+        }
+
+        send_packet(bg_socket_fd, command->code, line, strlen(line));
+
+
+        int rc = run_stream_command(bg_socket_fd, command, fd);
+        if(fd > STDERR_FILENO) close(fd); // check to avoid closing stdin/stdout/stderr
+        if(rc < 0) {
+            bg_end_notify(pipe_fd[1], bg_socket_fd, EXIT_FAILURE,
+                "[ERROR]: Background operation failed during stream transfer.\n");
+        }
+        
+        char success_msg[256];
+        if(command->code == CMD_UPLOAD_BEGIN){
+            snprintf(success_msg, sizeof(success_msg), "[Background] Command: upload %s %s concluded successfully.\n", command->buf, command->buf2);
+        }
+        if(command->code == CMD_DOWNLOAD_BEGIN){
+            snprintf(success_msg, sizeof(success_msg), "[Background] Command: download %s %s concluded successfully.\n", command->buf, command->buf2);
+        }
+
+        bg_end_notify(pipe_fd[1], bg_socket_fd, EXIT_SUCCESS, success_msg);
     } else if (pid < 0) {
         perror("fork");
     } 
@@ -382,14 +455,6 @@ int main(int argc, char *argv[]) {
                 break; // exit the loop on 
             }
 
-            // if -b option is set, spawn a background process to handle the command
-            if(command.is_background) {
-                spawn_background(&command, pipe_fd, socket_fd);
-                background_operations++;
-                printf("[INFO]: Background operation started. Total background operations: %d\n", background_operations);
-                continue; // continue to next iteration to wait for more input or server response
-            }
-
             // boolean condition to check if the command is a stream command (upload/download or read/write)
             int is_stream = (command.code == CMD_READ || command.code == CMD_WRITE ||
                              command.code == CMD_UPLOAD_BEGIN || command.code == CMD_DOWNLOAD_BEGIN);
@@ -397,24 +462,23 @@ int main(int argc, char *argv[]) {
             // open the local file first, to check if it is accessible, before sending the command to the server
             int local_fd = -1;
             if(is_stream) {
-                const char *local_name = NULL;
-                if(command.code == CMD_READ) {
-                    local_fd = STDOUT_FILENO;
-                } else if(command.code == CMD_WRITE) {
-                    local_fd = STDIN_FILENO;
-                    fprintf(stderr, "[INFO]: type the content, then press Ctrl-D to end the input\n");
-                } else if(command.code == CMD_UPLOAD_BEGIN) {
-                    local_name = command.buf;  // upload <client path> <server path>
-                    local_fd = open(local_name, O_RDONLY);
-                } else { // CMD_DOWNLOAD_BEGIN: download <server path> <client path>
-                    local_name = command.buf2;
-                    local_fd = open(local_name, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-                }
-
-                if(local_fd < 0) {
-                    fprintf(stderr, "[ERROR]: cannot open the local file '%s': %s\n",
-                            local_name ? local_name : "", strerror(errno));
+                int r = compute_local_fd(&command, &local_fd);
+                if(r < 0) {
                     continue; // the command is not sent to the server if the local file cannot be opened
+                }
+            }
+
+            // if -b option is set, spawn a background process to handle the command
+            if(command.is_background) {
+                if(command.code == CMD_UPLOAD_BEGIN || command.code == CMD_DOWNLOAD_BEGIN) {
+                    spawn_background(&command, line, pipe_fd, socket_fd);
+                    background_operations++;
+                    printf("[INFO]: Background operation started. Total background operations: %d\n", background_operations);
+                    continue; // continue to next iteration to wait for more input or server response
+                } else {
+                    fprintf(stderr, "[ERROR]: Background operation is only supported for upload and download commands.\n");
+                    if(local_fd > STDERR_FILENO) close(local_fd); // check to avoid closing stdin/stdout/stderr
+                    continue; // continue to next iteration
                 }
             }
 

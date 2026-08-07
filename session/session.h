@@ -16,6 +16,8 @@
 
 int setup_server_gid(char *error_msg, uint32_t err_size);
 
+int is_csap_user(const struct passwd *pwd);
+
 int create_home_directory(const char *root, const char *username, char *err_msg, 
     uint32_t err_size, mode_t perms, struct passwd *new_pwd);
 

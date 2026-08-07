@@ -230,6 +230,10 @@ int run_stream_command(int sockfd, cmd_t *command, int local_fd){
             return -1;
         }
 
+        if(command->code == CMD_WRITE){
+            fprintf(stderr, "[INFO]: type the content, then press Ctrl-D to end the input\n");
+        }
+
         uint8_t data_code = (command->code == CMD_WRITE) ? CMD_WRITE_DATA : CMD_DATA; // distinguish between write and upload
         uint8_t end_code  = (command->code == CMD_WRITE) ? CMD_WRITE_END  : CMD_DATA_END;
 
@@ -263,7 +267,6 @@ int compute_local_fd(cmd_t *command, int *local_fd) {
         *local_fd = STDOUT_FILENO;
     } else if(command->code == CMD_WRITE) {
         *local_fd = STDIN_FILENO;
-        fprintf(stderr, "[INFO]: type the content, then press Ctrl-D to end the input\n");
     } else if(command->code == CMD_UPLOAD_BEGIN) {
         local_name = command->buf;  // upload <client path> <server path>
         *local_fd = open(local_name, O_RDONLY);
@@ -341,10 +344,10 @@ void spawn_background(cmd_t *command, const char *line, int* pipe_fd, int socket
         
         char success_msg[256];
         if(command->code == CMD_UPLOAD_BEGIN){
-            snprintf(success_msg, sizeof(success_msg), "[Background] Command: upload %s %s concluded successfully.\n", command->buf, command->buf2);
+            snprintf(success_msg, sizeof(success_msg), "[Background] Command: upload %.90s %.90s concluded successfully.\n", command->buf, command->buf2);
         }
         if(command->code == CMD_DOWNLOAD_BEGIN){
-            snprintf(success_msg, sizeof(success_msg), "[Background] Command: download %s %s concluded successfully.\n", command->buf, command->buf2);
+            snprintf(success_msg, sizeof(success_msg), "[Background] Command: download %.90s %.90s concluded successfully.\n", command->buf, command->buf2);
         }
 
         bg_end_notify(pipe_fd[1], bg_socket_fd, EXIT_SUCCESS, success_msg);
@@ -427,9 +430,13 @@ int main(int argc, char *argv[]) {
                 */
 
             char line[MAX_CLIENT_BUFFER];
-            ssize_t bytes_read = read_line(STDIN_FILENO, line, sizeof(line));
-            if(bytes_read <= 0) {
-                break; // EOF or error on stdin
+            int stdin_eof = 0; // flag to indicate if EOF has been reached on stdin
+            ssize_t bytes_read = read_line(STDIN_FILENO, line, sizeof(line), &stdin_eof);
+            if(bytes_read < 0 || stdin_eof) {
+                break; 
+            }
+            if(bytes_read == 0) {
+                continue; 
             }
 
             // implement commands parsing and handling mechanism
@@ -472,6 +479,7 @@ int main(int argc, char *argv[]) {
             if(command.is_background) {
                 if(command.code == CMD_UPLOAD_BEGIN || command.code == CMD_DOWNLOAD_BEGIN) {
                     spawn_background(&command, line, pipe_fd, socket_fd);
+                    if(local_fd > STDERR_FILENO) close(local_fd); // check to avoid closing stdin/stdout/stderr
                     background_operations++;
                     printf("[INFO]: Background operation started. Total background operations: %d\n", background_operations);
                     continue; // continue to next iteration to wait for more input or server response

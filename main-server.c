@@ -407,12 +407,14 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             send_ok(clientSocket, reason, strlen(reason));
 
             // unlock
-            release_lock(src_fd, 0, 0);
+            if(src_fd >= 0) {
+                release_lock(src_fd, 0, 0);
+                close(src_fd);
+            }
             if(dest_fd >= 0) {
                 release_lock(dest_fd, 0, 0);
                 close(dest_fd);
             }
-            close(src_fd);
 
             break;
         }
@@ -1160,9 +1162,9 @@ void create_root_directory(char *root_directory) {
                 // extract the PID from the entry name
                 pid_t pid = atoi(entry->d_name + 5);
                 // check if the process with that PID is still running (0 is commonly used to check for existence)
-                if(kill(pid, 0) == -1 && errno == ESRCH) {
+                if(kill(pid, 0) == -1 && errno == ESRCH) { // ESRCH means the process does not exist
                     // process does not exist, safe to remove the fifo
-                    char fifo_path[PATH_MAX + 64];
+                    char fifo_path[PATH_MAX + 320];
                     snprintf(fifo_path, sizeof(fifo_path), "%s/%s", sessions_dir, entry->d_name);
                     if(unlink(fifo_path) < 0) {
                         perror("unlink fifo");
@@ -1291,12 +1293,12 @@ int main(int argc, char *argv[]) {
 
             clientSocket = accept(s, (struct sockaddr*)&clientAddress, &clientAddressLen);
 
-            printf("[INFO]: New connection accepted from %s:%d\n", inet_ntoa(clientAddress.sin_addr), ntohs(clientAddress.sin_port));
-
             if(clientSocket < 0) {
                 if(errno == EINTR) continue; // if interrupted by signal, retry
                 perror("accept"); continue;
             }
+
+            printf("[INFO]: New connection accepted from %s:%d\n", inet_ntoa(clientAddress.sin_addr), ntohs(clientAddress.sin_port));
 
             // fork a new process to handle the client
             fflush(NULL);

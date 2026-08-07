@@ -140,8 +140,9 @@ int open_temp_for_upload(const char *dest_path, char *temp_path_out, size_t out_
 /*
 Function used to read one line from stdin or socket, byte by byte.
 */
-ssize_t read_line(int fd, char *buf, size_t size){
+ssize_t read_line(int fd, char *buf, size_t size, int *eof_flag) {
     size_t i = 0;
+    if(eof_flag) *eof_flag = 0; // initialize EOF flag to 0
     while(i + 1 < size){
         char c;
         ssize_t n = read(fd, &c, 1);
@@ -149,7 +150,10 @@ ssize_t read_line(int fd, char *buf, size_t size){
             if(errno == EINTR) continue; // interrupted by a signal, retry
             return -1;
         }
-        if(n == 0) break;    // EOF
+        if(n == 0) {
+            if(i==0 && eof_flag) *eof_flag = 1; // set EOF flag
+            break;
+        }    // EOF
         if(c == '\n') break; // end of the command, the newline is consumed
         buf[i++] = c;
     }

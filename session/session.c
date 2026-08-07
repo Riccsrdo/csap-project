@@ -10,6 +10,40 @@ Responsible for:
 
 gid_t server_gid = 0;
 
+/*
+Helper function used to validate validity of provided username, especially for the creation of users.
+*/
+static int validate_username(const char *username, char *err_msg, uint32_t err_size) {
+    size_t len = strlen(username);
+    if(len < 3 || len > 32) { // check len bounded between 3 and 32 characters
+        snprintf(err_msg, err_size, "Username must be between 3 and 32 characters");
+        return -1;
+    }
+    if(!isalpha((unsigned char)username[0])) { // check first character is a letter, number is forbidden
+        snprintf(err_msg, err_size, "Username must start with a letter");
+        return -1;
+    }
+    for(size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)username[i]; // cast to unsigned char to avoid issues with negative values
+        if(!isalnum(ch) && ch != '_' && ch != '-') { // check if character is not in [a-zA-Z0-9_-]
+            snprintf(err_msg, err_size,
+                "Username can only contain letters, numbers, underscores and hyphens");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+Helper function used to check if a user is a valid CSAP user.
+*/
+int is_csap_user(const struct passwd *pwd) {
+    if(pwd == NULL) return 0;
+    if(pwd->pw_uid < 1000) return 0; // 1000 is the typical minimum UID for regular users on Linux
+    if(server_gid != 0 && pwd->pw_gid != server_gid) return 0;
+    return 1;
+}
+
 int create_home_directory(const char *root, const char *username, char *err_msg, 
     uint32_t err_size, mode_t perms, struct passwd *new_pwd) {
     char home_dir[PATH_MAX +64];
@@ -102,41 +136,20 @@ int setup_server_gid(char *error_msg, uint32_t err_size) {
 }
 
 int handle_create_user(const char* username, mode_t perms, const char *root, char *err_msg, uint32_t err_size) {
-    // first check if username already exists in the system
+
+    if(validate_username(username, err_msg, err_size) < 0) {
+        err_msg[err_size - 1] = '\0';
+        return -1;
+    }
+
+    if(perms > 0777) {
+        strncpy(err_msg, "Permissions must be between 0000 and 0777", err_size - 1);
+        err_msg[err_size - 1] = '\0';
+        return -1;
+    }
+
     struct passwd *pwd = getpwnam(username);
-    if(pwd == NULL) {
-        // create user
-        // if the user does not exist, validate first the username, checking if it's in[a-z0-9_-],
-        // first character not a number, and length between 3 and 32 characters
-        size_t len = strlen(username);
-        if(len < 3 || len > 32) {
-            strncpy(err_msg, "Username must be between 3 and 32 characters", err_size - 1);
-            err_msg[err_size - 1] = '\0';
-            return -1;
-        }
-        if(!isalpha(username[0])) {
-            strncpy(err_msg, "Username must start with a letter", err_size - 1);
-            err_msg[err_size - 1] = '\0';
-            return -1;
-        }
-        for(size_t i = 0; i < len; i++) {
-            // if character i is not in [a-z0-9_-], return error
-            if(!isalnum(username[i]) && username[i] != '_' && username[i] != '-') {
-                strncpy(err_msg, "Username can only contain letters, numbers, underscores and hyphens", err_size - 1);
-                err_msg[err_size - 1] = '\0';
-                return -1;
-            }
-        }
-
-        // parsing of permissions, validate perms is between 0000 and 0777
-        if(perms > 0777) {
-            strncpy(err_msg, "Permissions must be between 0000 and 0777", err_size - 1);
-            err_msg[err_size - 1] = '\0';
-            return -1;
-        }
-
-        // create the user, using fork() and execlp to call useradd
-
+    if(pwd != NULL) {
         // check if the server is running as root, if not return error
         if(geteuid() != 0) {
             strncpy(err_msg, "Server must be run as root to create users", err_size - 1);
@@ -184,6 +197,13 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
                 return -1;
             }
         }
+    }
+    
+
+    if(!is_csap_user(pwd)) {
+        strncpy(err_msg, "User is not a valid CSAP user", err_size - 1);
+        err_msg[err_size - 1] = '\0';
+        return -1;
     }
 
     // create folder for the user in the root directory, with the specified permissions
@@ -254,6 +274,11 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
     // set cwd of the user to their home directory
     if(chdir(home_dir) < 0) {
         snprintf(err_msg, err_size - 1, "Failed to change directory to user's home: %s", strerror(errno));
+        err_msg[err_size - 1] = '\0';
+        close(n_fd);
+        unlink(fifo_name);
+        session->notify_fd = -1;
+        session->logged_in = 0;
         return -1;
     }
 
@@ -270,21 +295,41 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
     snprintf(sessions_dir, sizeof(sessions_dir), "%s/.sessions", session->root_path);
     if(chown(sessions_dir, 0, server_gid) < 0) {
         snprintf(err_msg, err_size - 1, "Failed to set ownership of .sessions directory: %s", strerror(errno));
+        err_msg[err_size - 1] = '\0';
+        close(n_fd);
+        unlink(fifo_name);
+        session->notify_fd = -1;
+        session->logged_in = 0;
         return -1;
     }
 
     // set ownership of the fifo to user:csap_group
     if(chown(fifo_name, session->uid, server_gid) < 0){
         snprintf(err_msg, err_size - 1, "Failed to set ownership of FIFO: %s", strerror(errno));
+        err_msg[err_size - 1] = '\0';
+        close(n_fd);
+        unlink(fifo_name);
+        session->notify_fd = -1;
+        session->logged_in = 0;
         return -1;
     }
 
     if(setegid(server_gid) < 0) {
         snprintf(err_msg, err_size - 1, "Failed to set effective GID: %s", strerror(errno));
+        err_msg[err_size - 1] = '\0';
+        close(n_fd);
+        unlink(fifo_name);
+        session->notify_fd = -1;
+        session->logged_in = 0;
         return -1;
     }
     if(seteuid(session->uid) < 0) {
         snprintf(err_msg, err_size - 1, "Failed to set effective UID: %s", strerror(errno));
+        err_msg[err_size - 1] = '\0';
+        close(n_fd);
+        unlink(fifo_name);
+        session->notify_fd = -1;
+        session->logged_in = 0;
         return -1;
     }
 

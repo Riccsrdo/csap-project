@@ -535,7 +535,6 @@ int main(int argc, char *argv[]) {
         // check if there is activity on the pipe (child process output)
         if(FD_ISSET(pipe_fd[0], &readfds)) {
             // read the output from the child process and print it to stdout
-            // TODO: implement pipe reading logic
 
             char buf[512];
             ssize_t bytes_read = read(pipe_fd[0], buf, sizeof(buf) -1);

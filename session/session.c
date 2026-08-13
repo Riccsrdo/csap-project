@@ -149,7 +149,7 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
     }
 
     struct passwd *pwd = getpwnam(username);
-    if(pwd != NULL) {
+    if(pwd == NULL) {
         // check if the server is running as root, if not return error
         if(geteuid() != 0) {
             strncpy(err_msg, "Server must be run as root to create users", err_size - 1);

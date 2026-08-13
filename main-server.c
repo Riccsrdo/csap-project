@@ -7,6 +7,7 @@ Responsible for:
 - loop accept and fork;
 - overall cleanup of resources.
 */
+#include <asm-generic/errno.h>
 #include<netinet/in.h> // Address information
 #include<stdio.h>
 #include<stdlib.h>
@@ -32,16 +33,66 @@ Responsible for:
 #include"session/session.h"
 #include"transfer/transfer.h"
 #include"locks/locks.h"
+#include"sh_mem/sh_mem.h"
 
 #define MAX_CLIENT_BUFFER 1024
 
 char root_directory[PATH_MAX]; // global variable to hold the root directory path
 
+// setup shared memory segment
+int shm_id = -1, sem_id = -1;
+shared_memory_t *shared_memory = NULL;
+
+static void cleanup_ipc(void){
+    cleanup_shmem(shm_id, sem_id, shared_memory);
+    shm_id = -1;
+    shared_memory = NULL;
+}
+
+void handle_termination(int sig){
+    (void)sig; // suppress unused parameter warning
+    cleanup_ipc();
+    signal(SIGTERM, SIG_IGN); // ignore further SIGTERM signals
+    kill(0, SIGTERM); // send SIGTERM to all processes in the same process group
+    _exit(EXIT_SUCCESS); // exit the process
+}
+
 void handle_signals(int sig) {
     // wait for all dead processes (SIGCHLD) without blocking
     (void)sig; 
     int saved_errno = errno;
-    while(waitpid(-1, NULL, WNOHANG) > 0){
+    pid_t pid;
+    while((pid = waitpid(-1, NULL, WNOHANG)) > 0){
+        if(pid < 0) {
+            if(errno == ECHILD) break; // no more child processes
+            else {
+                perror("waitpid");
+                break;
+            }
+        }
+        // clean entry from sessions table
+        int r = sem_lock(sem_id);
+        if(r < 0) {
+            fprintf(stderr, "Failed to lock semaphore: %s\n", strerror(-r));
+            continue;
+        }
+
+        // look for the entry with the matching pid and mark it as not in use
+        for(int i = 0; i < shared_memory->session_table.count; i++) {
+            if(shared_memory->session_table.entries[i].pid == pid) {
+                shared_memory->session_table.entries[i].in_use = 0;
+                // clean everything else in the entry
+                memset(shared_memory->session_table.entries[i].username, 0, sizeof(shared_memory->session_table.entries[i].username));
+                shared_memory->session_table.entries[i].pid = -1;
+                break;
+            }
+        }
+        
+        r = sem_unlock(sem_id);
+        if(r < 0) {
+            fprintf(stderr, "Failed to unlock semaphore: %s\n", strerror(-r));
+            continue;
+        }
     }
     errno = saved_errno;
 }
@@ -171,7 +222,49 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char msg[128];
             int n = snprintf(msg, sizeof(msg), "Logged in as %s", session->user);
             send_ok(clientSocket, msg, n);
+
+            // fill sessions table with the new session information
+            session_entry_t *entry = {0};
+            entry->pid = getpid();
+            entry->in_use = 1;
+            strncpy(entry->username, session->user, sizeof(entry->username) - 1);
+            
+            int r = sem_lock(sem_id);
+            if(r < 0) {
+                send_err(clientSocket, r, "Failed to lock semaphore");
+                free(entry);
+                return;
+            }
+            // look for first entry having in_use == 0, if found use it, else use the next available entry
+            int found = 0;
+            for(int i = 0; i < shared_memory->session_table.count; i++) {
+                if(shared_memory->session_table.entries[i].in_use == 0) {
+                    shared_memory->session_table.entries[i] = *entry;
+                    found = 1;
+                    break;
+                }
+            }
+            if(!found) {
+                if(shared_memory->session_table.count >= MAX_ENTRIES) {
+                    send_err(clientSocket, ENOMEM, "Session table is full");
+                    free(entry);
+                    r = sem_unlock(sem_id);
+                    if(r < 0) {
+                        send_err(clientSocket, r, "Failed to unlock semaphore");
+                    }
+                    return;
+                }
+            }
+            shared_memory->session_table.count++;
+            r = sem_unlock(sem_id);
+            if(r < 0) {
+                send_err(clientSocket, r, "Failed to unlock semaphore");
+                free(entry);
+                return;
+            }
+
         }
+
 
         #if DEBUG
         printf("[DEBUG]: User %s logged in with UID %d\n", session->user, session->uid);
@@ -1219,6 +1312,8 @@ int main(int argc, char *argv[]) {
     }
 
     signal(SIGPIPE, SIG_IGN); // ignore SIGPIPE to prevent the server from crashing when trying to write to a closed socket
+    signal(SIGINT, handle_termination);
+    signal(SIGTERM, handle_termination); 
 
     int s = start_server(ip_address, port_number);
 
@@ -1245,6 +1340,13 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "[SETUP] %s\n", err_msg);
             exit(EXIT_FAILURE);
         }
+    }
+
+    // shared memory and semaphores setup, used for transfer requests
+    int r = setup_shmem(&shm_id, &sem_id, &shared_memory, server_gid);
+    if(r < 0) {
+        fprintf(stderr, "Failed to setup shared memory segment.\n");
+        exit(EXIT_FAILURE);
     }
 
     printf("[SETUP]: Server loop started. \tType 'exit' to close\n");
@@ -1324,12 +1426,8 @@ int main(int argc, char *argv[]) {
 
         
     }
-    // kill all child processes before exiting, as if we're out the loop the server is shutting / there's been an error
-    
-    signal(SIGTERM, SIG_IGN); // ignore SIGTERM in the parent to avoid killing myself
-    kill(0, SIGTERM); // send SIGTERM, 0 indicates all processes in the same process group
-    
-    printf("[CLOSE] All children have been killed. \n");
+
+    cleanup_ipc();
 
     close(s);
 

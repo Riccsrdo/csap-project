@@ -7,6 +7,7 @@
 #include<stdlib.h>
 #include<stdio.h>
 #include"../network/network.h" // fix with makefile
+#include<errno.h>
 //#include"network.h"
 
 #define MAX_ARGS 8
@@ -17,8 +18,8 @@ typedef struct{
     int is_dir; // 1 if directory, 0 if file
     long offset; // offset for read/write operations, -1 if not applicable
     int argc; // number of arguments
-    char buf[2 * PATH_MAX]; // buffer for data
-    char buf2[2 * PATH_MAX]; // additional buffer for data, if needed
+    char buf[PATH_MAX]; // buffer for data
+    char buf2[PATH_MAX]; // additional buffer for data, if needed
 } cmd_t; // reminder for me: copy cmd_t using pointer
 
 

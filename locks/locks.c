@@ -39,11 +39,3 @@ int acquire_write_lock(int fd, off_t offset, off_t len) {
 int release_lock(int fd, off_t offset, off_t len) {
     return set_lock(fd, F_UNLCK, F_SETLK, offset, len); // non blocking unlock
 }
-
-int acquire_read_lock_blocking(int fd, off_t offset, off_t len) {
-    return set_lock(fd, F_RDLCK, F_SETLKW, offset, len); // blocking read lock
-}
-
-int acquire_write_lock_blocking(int fd, off_t offset, off_t len) {
-    return set_lock(fd, F_WRLCK, F_SETLKW, offset, len); // blocking write lock
-}

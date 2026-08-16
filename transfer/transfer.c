@@ -7,6 +7,145 @@ Responsible for:
 */
 #include"transfer.h"
 
+/*
+Used to perform the copy of a file from src_path to dest_path, both absolute paths.
+Returns 0 on success, -errno on failure.
+Acquires a read lock on the source file and a write lock on the destination 
+Releases the locks after the operation is complete.
+*/
+int execute_transfer_copy(const char *src_path, const char *dest_path){
+    int src_fd = -1;
+    int dest_fd = -1;
+
+    struct stat src_stat;
+
+    // temporarily elevate privileges to open source file contained in another virtual file system
+    uid_t original_euid = geteuid();
+    if(seteuid(0) < 0){
+        return -errno;
+    }
+
+    src_fd = open(src_path, O_RDONLY | O_NOFOLLOW); // O_NOFOLLOW to prevent following symlinks
+    int open_errno = errno; // capture errno in case of failure
+
+    // restore original privileges
+    if(seteuid(original_euid) < 0){
+        int saved_errno = errno; // close may overwrite errno, so save it
+        if(src_fd >= 0){
+            close(src_fd);
+        }
+        return -saved_errno;
+    }
+
+    // check if source file was opened successfully
+    if(src_fd < 0){
+        return -open_errno; // return the error code from open
+    }
+
+    // check if source file is a regular file
+    if(fstat(src_fd, &src_stat) < 0){
+        int saved_errno = errno;
+        close(src_fd);
+        return -saved_errno;
+    }
+
+    if(!S_ISREG(src_stat.st_mode)){
+        close(src_fd);
+        return -EINVAL; // source is not a regular file
+    }
+
+    // open destination file for writing
+    // if the destination file already exists, I don't overwrite it
+    dest_fd = open(dest_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if(dest_fd < 0){
+        close(src_fd);
+        return -errno;
+    }
+
+    // acquire read lock on source file
+    int r = acquire_read_lock(src_fd, 0, 0);
+    if(r < 0){
+        close(src_fd);
+        close(dest_fd);
+        return r; 
+    }
+
+    // acquire write lock on destination file
+    r = acquire_write_lock(dest_fd, 0, 0);
+    if(r < 0){
+        release_lock(src_fd, 0, 0);
+        close(src_fd);
+        close(dest_fd);
+        return r; 
+    }
+
+    // perform the copy
+    char buffer[4096];
+    ssize_t bytes_read;
+    while((bytes_read = read(src_fd, buffer, sizeof(buffer))) > 0){
+        if(bytes_read < 0){
+            if(errno == EINTR) continue; 
+            break;
+        }
+        ssize_t bytes_written = write_all(dest_fd, buffer, bytes_read);
+        if(bytes_written < 0){
+            release_lock(src_fd, 0, 0);
+            release_lock(dest_fd, 0, 0);
+            close(src_fd);
+            close(dest_fd);
+
+            // remove dest file as the copy failed
+            unlink(dest_path);
+            return bytes_written; //err code
+        }
+
+    }
+
+    // release locks and close file descriptors
+    int read_errno = (bytes_read < 0) ? -errno : 0; // capture read error if any
+    release_lock(src_fd, 0, 0);
+    release_lock(dest_fd, 0, 0);
+    close(src_fd);
+    close(dest_fd);
+
+    if(read_errno != 0){
+        // remove the destination file if the copy failed due to a read error
+        unlink(dest_path); // as I use the O_EXCL flag, removing is safe as the file has been created here
+        return -read_errno;
+    } else {
+        return 0; // success
+    }
+
+
+
+}
+
+/*
+similar to send_stream, but the source is a buffer in memory instead of a file descriptor.
+Returns the number of bytes sent on success, or a negative error code on failure.
+*/
+ssize_t send_stream_buf(int sockfd, const char *buf, size_t len, uint8_t data_code, uint8_t end_code){
+    if(buf == NULL && len > 0){
+        return -EINVAL;
+    }
+
+    size_t sent = 0;
+    while(sent < len){
+        size_t chunk = (len - sent > CHUNK_SIZE) ? CHUNK_SIZE : (len - sent);
+        if(send_packet(sockfd, data_code, buf + sent, (uint32_t)chunk) < 0){
+            return -EIO;
+        }
+        sent += chunk;
+    }
+
+    // frame finale senza payload per segnalare la fine dello stream
+    if(send_packet(sockfd, end_code, NULL, 0) < 0){
+        return -EIO;
+    }
+
+    return (ssize_t)sent;
+}
+
 ssize_t send_stream(int sockfd, int fd, off_t offset, uint8_t data_code, uint8_t end_code){
     char buffer[HDR_SIZE + CHUNK_SIZE];
 

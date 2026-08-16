@@ -89,19 +89,24 @@ int parse_command(const char *line, cmd_t *command, char *error_msg, uint32_t er
             } else if(strcmp(token, "-d") == 0) {
                 command->is_dir = 1;
             } else if(strncmp(token, "-offset=", 8) == 0) {
-                // check if the offset is a valid positive number
-                if (sscanf(token + 8, "%ld", &command->offset) != 1) {
+                char *endp;
+                errno = 0;
+                long offset = strtol(token + 8, &endp, 10);
+                if(errno != 0 || endp == token + 8 || *endp != '\0') {
+                    command->offset = -1; // invalid offset, set to -1
                     free(copy);
-                    snprintf(error_msg, err_size, "Invalid offset format");
-                    return -1; // error in number format
+                    snprintf(error_msg, err_size, "Invalid offset value");
+                    return -1;
                 }
-                // if offset is negative, return error
-                if (command->offset < 0) {
-                    command->offset = -1; // reset to default
+
+                if(offset < 0) {
+                    command->offset = -1; // negative offset, set to -1
                     free(copy);
                     snprintf(error_msg, err_size, "Offset cannot be negative");
                     return -1;
                 }
+
+                command->offset = offset;
             } else {
                 free(copy);
                 snprintf(error_msg, err_size, "Unknown option");
@@ -128,7 +133,6 @@ int parse_command(const char *line, cmd_t *command, char *error_msg, uint32_t er
     if(command->code == CMD_CREATE && arg_count!=2) {
         free(copy);
         snprintf(error_msg, err_size, "Invalid number of arguments for create command.\nSyntax: create <path> <permissions>\n");
-        return -1;
         return -1;
     }
     if(command->code == CMD_READ && arg_count!=1) {
@@ -176,7 +180,11 @@ int parse_command(const char *line, cmd_t *command, char *error_msg, uint32_t er
         free(copy);
         return -1; 
     }
-    // reject does not require any argument
+    if(command->code == CMD_REJECT && arg_count!=1) {
+        snprintf(error_msg, err_size, "Invalid number of arguments for reject command.\nSyntax: reject <id>.\n");
+        free(copy);
+        return -1; 
+    }
     if(command->code == CMD_CD && arg_count!=1) {
         snprintf(error_msg, err_size, "Invalid number of arguments for cd command.\nSyntax: cd <path>.\n");
         free(copy);

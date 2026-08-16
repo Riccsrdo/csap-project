@@ -4,6 +4,7 @@
 #include<stdint.h>
 #include<stdio.h>
 #include<stdlib.h>
+#include<signal.h>
 #include"../utils/utils.h"
 #include <unistd.h>
 #include<sys/stat.h>

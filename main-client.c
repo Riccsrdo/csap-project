@@ -70,8 +70,6 @@ int start_client(char *ip_address, char *port_number){
         exit(EXIT_FAILURE);
     }
 
-    printf("[SETUP]: Socket created for client\n");
-
     struct sockaddr_in server_address; // struct to memorize server address information
     memset(&server_address, 0, sizeof(server_address)); // prepare memory for the struct
 
@@ -190,7 +188,7 @@ int run_stream_command(int sockfd, cmd_t *command, int local_fd){
     // flush to avoid interferences with printf()
     fflush(stdout);
 
-    if(command->code == CMD_READ || command->code == CMD_DOWNLOAD_BEGIN){
+    if(command->code == CMD_READ || command->code == CMD_DOWNLOAD_BEGIN || command->code == CMD_LIST){
         // the server answers OK with the number of bytes that will follow
         char size_payload[64];
         uint32_t size_len = 0;
@@ -206,8 +204,14 @@ int run_stream_command(int sockfd, cmd_t *command, int local_fd){
             if(errno == 0 && end != size_payload && v >= 0) expected_total = (int64_t)v; // valid number of bytes expected
         }
 
-        uint8_t data_code = (command->code == CMD_READ) ? CMD_READ_DATA : CMD_DATA; // distinguish between read and download
-        uint8_t end_code  = (command->code == CMD_READ) ? CMD_READ_END  : CMD_DATA_END;
+        uint8_t data_code, end_code;
+        if(command->code == CMD_READ) {
+            data_code = CMD_READ_DATA; end_code = CMD_READ_END;
+        } else if(command->code == CMD_LIST) {
+            data_code = CMD_LIST_DATA; end_code = CMD_LIST_END;
+        } else { // CMD_DOWNLOAD_BEGIN
+            data_code = CMD_DATA;      end_code = CMD_DATA_END;
+        }
 
         char err[256];
         err[0] = '\0'; 
@@ -220,7 +224,8 @@ int run_stream_command(int sockfd, cmd_t *command, int local_fd){
         }
 
         // to avoid interferences with printf() in the main loop, print the number of bytes received in stderr
-        fprintf(stderr, "[Server]: %lld bytes received\n", (long long)received);
+        fprintf(stderr, "[Server]: %lld bytes %s\n", (long long)received,
+                (command->code == CMD_LIST) ? "listed" : "received");
         return 0;
     }
 
@@ -263,7 +268,7 @@ int run_stream_command(int sockfd, cmd_t *command, int local_fd){
 // helper function to compute the local file descriptor based on the command type
 int compute_local_fd(cmd_t *command, int *local_fd) {
     const char *local_name = NULL;
-    if(command->code == CMD_READ) {
+    if(command->code == CMD_READ || command->code == CMD_LIST) {
         *local_fd = STDOUT_FILENO;
     } else if(command->code == CMD_WRITE) {
         *local_fd = STDIN_FILENO;
@@ -342,12 +347,12 @@ void spawn_background(cmd_t *command, const char *line, int* pipe_fd, int socket
                 "[ERROR]: Background operation failed during stream transfer.\n");
         }
         
-        char success_msg[256];
+        char success_msg[256] = "";
         if(command->code == CMD_UPLOAD_BEGIN){
-            snprintf(success_msg, sizeof(success_msg), "[Background] Command: upload %.90s %.90s concluded successfully.\n", command->buf, command->buf2);
+            snprintf(success_msg, sizeof(success_msg), "[Background] Command: upload %.90s %.90s concluded\n", command->buf2, command->buf);
         }
         if(command->code == CMD_DOWNLOAD_BEGIN){
-            snprintf(success_msg, sizeof(success_msg), "[Background] Command: download %.90s %.90s concluded successfully.\n", command->buf, command->buf2);
+            snprintf(success_msg, sizeof(success_msg), "[Background] Command: download %.90s %.90s concluded\n", command->buf, command->buf2);
         }
 
         bg_end_notify(pipe_fd[1], bg_socket_fd, EXIT_SUCCESS, success_msg);
@@ -379,6 +384,7 @@ int main(int argc, char *argv[]) {
 
     int socket_fd = start_client(ip_address, port_number); // start the client and get the socket descriptor
 
+    printf("[SETUP]: Socket created for client\n");
     printf("[SETUP]: Client started. Connected to server at %s:%s\n", ip_address, port_number);
 
     // create a pipe for communication with child processes, which handles background operations
@@ -464,7 +470,8 @@ int main(int argc, char *argv[]) {
 
             // boolean condition to check if the command is a stream command (upload/download or read/write)
             int is_stream = (command.code == CMD_READ || command.code == CMD_WRITE ||
-                             command.code == CMD_UPLOAD_BEGIN || command.code == CMD_DOWNLOAD_BEGIN);
+                             command.code == CMD_UPLOAD_BEGIN || command.code == CMD_DOWNLOAD_BEGIN
+                            || command.code == CMD_LIST);
 
             // open the local file first, to check if it is accessible, before sending the command to the server
             int local_fd = -1;

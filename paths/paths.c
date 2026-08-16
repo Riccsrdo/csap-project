@@ -35,7 +35,8 @@ int validate_path(const char *path, const char *root, char *validated_path) {
 
     // first try to validate assuming file already exists
     if(realpath(path, validated_path) != NULL) {
-        if(strncmp(validated_path, root, root_len) != 0 || (validated_path[root_len] != '/' && validated_path[root_len] != '\0')) {
+        if(strncmp(validated_path, nroot, root_len) != 0 || (validated_path[root_len] != '/' && validated_path[root_len] != '\0')) {
+            validated_path[0] = '\0';
             return -1; // path is outside the root directory
         }
         return 0; // path is valid and within the root directory
@@ -75,7 +76,7 @@ int validate_path(const char *path, const char *root, char *validated_path) {
     }
 
     // if we're here, resolved_parent exists, so we validate it against the root
-    if(strncmp(resolved_parent, root, root_len) != 0 || (resolved_parent[root_len] != '/' && resolved_parent[root_len] != '\0')) {
+    if(strncmp(resolved_parent, nroot, root_len) != 0 || (resolved_parent[root_len] != '/' && resolved_parent[root_len] != '\0')) {
         free(path_copy);
         free(path_copy2);
         validated_path[0] = '\0';

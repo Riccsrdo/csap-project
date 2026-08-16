@@ -69,6 +69,11 @@ void sb_free(strbuf_t *sb) {
 int validate_permissions(long *perms, char *buf){
     char *end;
     errno = 0;
+
+    if(buf == NULL || buf[0] == '\0') {
+        return -1; // empty string is invalid
+    }
+
     long val = strtol(buf, &end, 8);
     if(errno != 0 || *end != '\0' || val < 0 || val > 0777) {
         return -1;

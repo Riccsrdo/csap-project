@@ -33,16 +33,21 @@ int setup_shmem(int *smh_id, int *sem_id, shared_memory_t **shm_ptr_out, gid_t o
         return -errno;
     }
 
+    *smh_id = shm_id_temp;
+
     // attach to the shared memory segment
     // NULL means the system chooses the address at which to attach the segment
     shared_memory_t *shm_ptr = (shared_memory_t *)shmat(shm_id_temp, NULL, 0);
     if(shm_ptr == (void *)-1){
         int saved = errno;
         shmctl(shm_id_temp, IPC_RMID, NULL); // remove the shared memory
+        *smh_id = -1;
         return -saved;
     }
 
     memset(shm_ptr, 0, sizeof(shared_memory_t)); // initialize the shared memory to zero
+    // set first id of the pending requests table to 1
+    shm_ptr->pending_requests_table.next_id = 1;
 
     // I use 0660 to ensure also children belonging in the "csap_group" can modify the semaphore
     int sem_id_temp = semget(IPC_PRIVATE, 1, IPC_CREAT | 0660);
@@ -50,14 +55,14 @@ int setup_shmem(int *smh_id, int *sem_id, shared_memory_t **shm_ptr_out, gid_t o
         int saved = errno;
         shmdt(shm_ptr); // detach from the shared memory
         shmctl(shm_id_temp, IPC_RMID, NULL); // remove the shared memory
+        *sem_id = -1;
         return -saved;
     }
 
+    *sem_id = sem_id_temp;
+
     // initialize the union for semctl
     union semun arg;
-
-    // initialize the semaphore to 1 (unlocked)
-    arg.val = 1;
 
     struct semid_ds sem_info;
     arg.buf = &sem_info;
@@ -71,15 +76,22 @@ int setup_shmem(int *smh_id, int *sem_id, shared_memory_t **shm_ptr_out, gid_t o
             shmdt(shm_ptr); // detach from the shared memory
             shmctl(shm_id_temp, IPC_RMID, NULL); // remove the shared memory
             semctl(sem_id_temp, 0, IPC_RMID); // remove the semaphore
+            *sem_id = -1;
+            *smh_id = -1;
             return -saved;
         }
     }
 
-    if(semctl(sem_id_temp, 0, SETVAL, arg) < 0){
+    union semun arg2;
+    arg2.val = 1; // initialize the semaphore to 1 (unlocked)
+
+    if(semctl(sem_id_temp, 0, SETVAL, arg2) < 0){
         int saved = errno;
         shmdt(shm_ptr); // detach from the shared memory
         shmctl(shm_id_temp, IPC_RMID, NULL); // remove the shared memory
         semctl(sem_id_temp, 0, IPC_RMID); // remove the semaphore
+        *sem_id = -1;
+        *smh_id = -1;
         return -saved;
     }
 
@@ -88,7 +100,7 @@ int setup_shmem(int *smh_id, int *sem_id, shared_memory_t **shm_ptr_out, gid_t o
     *sem_id = sem_id_temp;
 
     // mark the shared memory for deletion, it will be deleted when all processes detach
-    shmctl(shm_id_temp, 0, IPC_RMID); 
+    shmctl(shm_id_temp, IPC_RMID, NULL);
     
     return 0; // success
 }

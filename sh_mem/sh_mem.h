@@ -17,11 +17,13 @@ enum to hold the status of a transfer request:
 - Pending: the request is waiting for a response
 - Accepted: the request has been accepted and the transfer can proceed
 - Rejected: the request has been rejected and the transfer cannot proceed
+- Failed: the request has failed and the transfer cannot proceed
 */
 enum request_status {
     PENDING = 0,
     ACCEPTED = 1,
-    REJECTED = 2
+    REJECTED = 2,
+    FAILED = 3
 };
 
 union semun { // union used for semctl() to set the value of the semaphore

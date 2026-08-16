@@ -98,9 +98,15 @@ int setup_server_gid(char *error_msg, uint32_t err_size) {
     }
 
     // create the group, using fork() and execlp to call groupadd
+    sigset_t chld_mask, old_mask;
+    sigemptyset(&chld_mask);
+    sigaddset(&chld_mask, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &chld_mask, &old_mask); // block SIGCHLD signals to avoid the server's handler dealing with SIGCHLD for this forked process
+
     fflush(NULL); // flush all stdio buffers before forking
     pid_t pid = fork();
     if(pid < 0) {
+        sigprocmask(SIG_SETMASK, &old_mask, NULL);
         snprintf(error_msg, err_size - 1, "Failed to fork for group creation: %s", strerror(errno));
         return -1;
     } else if(pid == 0) { // child process
@@ -109,9 +115,10 @@ int setup_server_gid(char *error_msg, uint32_t err_size) {
         perror("execlp groupadd");
         _exit(EXIT_FAILURE); // use _exit to avoid flushing stdio buffers again
     } else { // parent process
-        int status;
-        waitpid(pid, &status, 0);
-        if(WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        int status = -1;
+        pid_t w = waitpid(pid, &status, 0);
+        sigprocmask(SIG_SETMASK, &old_mask, NULL); // reset previous mask
+        if(w == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
             // group created successfully, get the gid
             grp = getgrnam("csap_group");
             if(grp) {
@@ -158,9 +165,16 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
             return -1;
         }
 
+
+        sigset_t chld_mask, old_mask;
+        sigemptyset(&chld_mask); // empty the signal set
+        sigaddset(&chld_mask, SIGCHLD); // add SIGCHLD to the set
+        sigprocmask(SIG_BLOCK, &chld_mask, &old_mask); // block SIGCHLD signals to avoid the server's handler dealing with SIGCHLD for this forked process
+
         fflush(NULL); // flush all stdio buffers before forking
         pid_t pid = fork();
         if(pid < 0) {
+            sigprocmask(SIG_SETMASK, &old_mask, NULL);
             strncpy(err_msg, "Failed to fork for user creation", err_size - 1);
             err_msg[err_size - 1] = '\0';
             return -1;
@@ -172,9 +186,10 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
             perror("execlp adduser");
             _exit(EXIT_FAILURE); // use _exit to avoid flushing stdio buffers again
         } else { // parent process
-            int status;
-            waitpid(pid, &status, 0);
-            if(WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            int status = -1;
+            pid_t w =waitpid(pid, &status, 0);
+            sigprocmask(SIG_SETMASK, &old_mask, NULL); // restore the old signal mask
+            if(w == pid &&WIFEXITED(status) && WEXITSTATUS(status) == 0) {
                 // user created successfully
                 // obtain uid
                 struct passwd *new_pwd = getpwnam(username);
@@ -228,8 +243,8 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
     }
 
     // verify if the user's home directory exists in the root directory
-    char home_dir[PATH_MAX];
-    snprintf(home_dir, sizeof(home_dir), "%s/%s", session->root_path, username);
+    char home_dir[PATH_MAX + 64];
+    snprintf(home_dir, sizeof(home_dir), "%s/%.32s", session->root_path, username);
 
     // perform canonicalization of the home_dir path to ensure it is within the root directory
     char resolved_home[PATH_MAX];
@@ -291,7 +306,7 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
     session->home_path[sizeof(session->home_path) - 1] = '\0';
 
     // set ownership of the .sessions dir to "root:csap_group"
-    char sessions_dir[PATH_MAX];
+    char sessions_dir[PATH_MAX + 64];
     snprintf(sessions_dir, sizeof(sessions_dir), "%s/.sessions", session->root_path);
     if(chown(sessions_dir, 0, server_gid) < 0) {
         snprintf(err_msg, err_size - 1, "Failed to set ownership of .sessions directory: %s", strerror(errno));

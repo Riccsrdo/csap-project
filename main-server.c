@@ -1639,18 +1639,6 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 // copy cwd to full_path
                 strncpy(full_path, cwd, sizeof(full_path) - 1);
                 full_path[sizeof(full_path) - 1] = '\0'; // ensure null
-                #if 0 // removed for now, as it is not needed, but can be useful for future debugging
-                // validate cwd against root_path
-
-                printf("[DEBUG]: Validating current working directory: %s against root path: %s\n", cwd, session->root_path);
-                r = validate_path(cwd, session->root_path, full_path);
-                if(r < 0) {
-                    printf("[CHECKPOINT]\n");
-                    const char *reason = "Invalid current working directory";
-                    send_err(clientSocket, EINVAL, reason);
-                    return;
-                }
-                #endif
             } else {
                 #if DEBUG
                 printf("[DEBUG]: User:%s Listing directory: %s\n", session->user, list_command.buf);

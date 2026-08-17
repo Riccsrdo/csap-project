@@ -6,17 +6,26 @@
 2. [How to start the Server](#how-to-start-the-server)
 3. [How to start the Client](#how-to-start-the-client)
 4. [Available Commands](#available-commands)
-    1. [create_user](#create_user-username-octal_perms)
-    2. [login](#login-username)
-    3. [create](#create-path-octal_perms)
-    4. [chmod](#chmod-path-octal_perms)
-    5. [move](#move-src_path-dest_path)
-    6. [cd](#cd-path)
-    7. [list](#list-path)
-    8. [read](#read-path)
-    9. [write](#write-path)
-    10. [upload](#upload-client_path-server_path)
-    11. [download](#download-server_path-client_path)
+    - [Before Login](#before-login)
+        1. [create_user](#create_user-username-octal_perms)
+        2. [login](#login-username)
+    - [After Login](#after-login)
+        1. [create](#create-path-octal_perms)
+        2. [chmod](#chmod-path-octal_perms)
+        3. [move](#move-src_path-dest_path)
+        4. [cd](#cd-path)
+        5. [list](#list-path)
+        6. [read](#read-path)
+        7. [write](#write-path)
+        8. [upload](#upload-client_path-server_path)
+        9. [download](#download-server_path-client_path)
+    - [Transfer Request](#transfer-request-mechanism)
+        1. [transfer_request](#transfer_request-file-dest_user)
+        2. [accept](#accept-directory-id)
+        3. [reject](#reject-id)
+5. [Design choices](#design-choices)
+6. [Project Structure](#project-structure)
+    
 
 ## How to Compile
 Run the following, inside the project's folder:
@@ -288,4 +297,125 @@ Closes the client.
 exit
 [CLOSE]: Exiting client.
 ```
+
+### Transfer Request Mechanism
+Allows one user to copy a file in his virtual file system into another user's file system, having the destination user accept the request.
+
+#### `transfer_request <file> <dest_user>`
+First, user performs request, waiting for the other user to accept:
+`marco`:
+
+```
+transfer_request temp.txt raffaele
+```
+
+The other user receives the request:
+`raffaele`:
+
+```
+Transfer request with ID 1 received
+```
+
+#### `accept <directory> <ID>`
+Destination user accepts the request, obtaining the ID from the previously printed message on `stdout`.
+```
+accept . 1
+[Server]:
+Transfer request accepted and file copied to temp.txt
+```
+
+Source user receives:
+```
+[Server]:
+Transfer request with ID 1 accepted
+```
+
+#### `reject <ID>`
+Destination user rejects the request:
+```
+reject 2
+[Server]:
+Transfer request rejected successfully
+```
+
+And source user:
+```
+[ERROR]: Transfer request with ID 2 rejected (Operation canceled)
+```
+
+#### Important 
+- IDs are incremental;
+- Only one destination user can accept or reject the request;
+- Transfer from multiple source user is permitted;
+- If the source user closes the connection while the request is pending, the request is removed.
+
+## Design Choices
+
+### Transfering does not overwrite files
+If the destination directory already contains a file with the same name, copying will fail with `File exists`. 
+
+### Symbolic Links are not followed in transfers and list
+To stop attackers from abusing root privileges of the Server to read content outside the allowed scope of the root folder.
+
+### `upload` and `write` are atomical
+Content is first written in a temporary file in the same directory as the destination, and then `rename()`-d. If the connection drops, the old file is not modified. 
+Exception is given by `write -offset=N`, which overwrites a portion of the file, thus operating on it directly.
+
+### Locks are non-blocking
+If another client is operating on a file, instead of letting the user's wait without any explanation, they receive a `Resource temporarily unavailable`. 
+
+Here is the matrix for lock operations:
+| Operation | Required Lock | Info |
+| --- | --- | ---| 
+| `read`, `download` | read lock | simultaneous readings allowed |
+| `write`, `upload` | write lock | no other read or write ops. |
+| `delete`| write lock | like write |
+| `move` | write lock on source (and destination if exists)| same as above |
+
+### Sandbox
+Each user is confined within its home. Each path is subject to a canolization first with `realpath()` function, and then checked with root folder.
+Nothing is allowed to leave user's home except `list`.
+
+### Termination
+- Termination of client is handled taking the number of background operations into consideration, waiting for all of them to finish.
+- All child processes are collected through a `SIGCHLD` handler.
+- All shared memory segments are correctly removed at closure.
+
+
+## Project Structure
+```
+.
+|
+|- makefile
+|
+|- main-server.c        start, parsing of argv, loop accept + fork, commands dispatch
+|
+|- main-client.c        loop on stdin/socket/pipe, background ops
+|
+|- network/             framing of packets, send/recv of bytes with EINTR management, send_ok/send_err from server to client
+|
+|- protocol/            commands parsing and options
+|
+|- fsops/               create, chmod, move, delete, cd, list
+|
+|- paths/               path canocalization and sandbox validation
+| 
+|- session/             user creation, login, privilege management
+|
+|- transfer/            upload, download, copy for transfer_req
+|
+|- locks/               wrapper for fcnlt for record locks
+|
+|- sh_mem/              System V shared memory and semaphores handling
+|
+|- utils/               dynamical buffers, write_all to ensure correct writing, read_line to read until '\n', permission parsing
+```
+
+#### Network Protocol
+```
+| preamble (2 B) | command/answer state (1 B) | payload lenght (4 B) | payload (N B) |
+```
+Up to 64 KB packets.
+
+See `DESIGN.md` for more informations in depth.
 

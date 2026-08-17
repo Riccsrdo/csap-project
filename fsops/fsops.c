@@ -227,7 +227,12 @@ int list(char *path, strbuf_t *sb) {
         closedir(dir); // close the directory
     } else {
         // if path is a file, print its information
-        int rc = constructFileInfo(sb, &fileStat, path);
+        char path_copy[PATH_MAX];
+        strncpy(path_copy, path, sizeof(path_copy) - 1);
+        path_copy[sizeof(path_copy) - 1] = '\0';
+        char *base_name = basename(path_copy); // get the base name of the file
+
+        int rc = constructFileInfo(sb, &fileStat, base_name);
         if(rc < 0) {
             return rc; // propagate error
         }

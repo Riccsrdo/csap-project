@@ -5,6 +5,7 @@ Responsible for:
 - Sandbox validation;
 */
 #include"paths.h"
+#include <asm-generic/errno.h>
 
 /* To validate the scope of user operations,
 call validate_path and look for the result
@@ -17,7 +18,7 @@ if != 0, the operation is outside the allowed scope, and should be rejected
 int validate_path(const char *path, const char *root, char *validated_path) {
 
     if(validated_path == NULL || path == NULL || root == NULL) {
-        return -1; // invalid input
+        return -EINVAL; // invalid input
     }
 
     validated_path[0] = '\0';
@@ -37,7 +38,7 @@ int validate_path(const char *path, const char *root, char *validated_path) {
     if(realpath(path, validated_path) != NULL) {
         if(strncmp(validated_path, nroot, root_len) != 0 || (validated_path[root_len] != '/' && validated_path[root_len] != '\0')) {
             validated_path[0] = '\0';
-            return -1; // path is outside the root directory
+            return -EPERM; // path is outside the root directory
         }
         return 0; // path is valid and within the root directory
     }
@@ -45,8 +46,9 @@ int validate_path(const char *path, const char *root, char *validated_path) {
     // check if the file does not exist, but parent directory does
     if(errno != ENOENT) {
         // reset validated_path to empty string, avoiding any potential misuse of uninitialized data with errors
+        int saved = errno; // save errno
         validated_path[0] = '\0';
-        return -1; 
+        return -saved; 
     }
 
     // the file might not exist, so we check if the parent directory is valid (useful for create operations)
@@ -61,7 +63,7 @@ int validate_path(const char *path, const char *root, char *validated_path) {
             free(path_copy2);
         }
         validated_path[0] = '\0';
-        return -1; // memory allocation failed
+        return -ENOMEM; // memory allocation failed
     }
 
     char *parent_dir = dirname(path_copy);
@@ -69,10 +71,11 @@ int validate_path(const char *path, const char *root, char *validated_path) {
 
     char resolved_parent[PATH_MAX];
     if(realpath(parent_dir, resolved_parent) == NULL) {
+        int saved = errno;
         free(path_copy);
         free(path_copy2);
         validated_path[0] = '\0';
-        return -1; // parent directory does not exist or cannot be resolved
+        return -saved; // parent directory does not exist or cannot be resolved
     }
 
     // if we're here, resolved_parent exists, so we validate it against the root
@@ -80,7 +83,7 @@ int validate_path(const char *path, const char *root, char *validated_path) {
         free(path_copy);
         free(path_copy2);
         validated_path[0] = '\0';
-        return -1; // parent directory is outside the root directory
+        return -EPERM; // parent directory is outside the root directory
     }
 
 
@@ -95,7 +98,7 @@ int validate_path(const char *path, const char *root, char *validated_path) {
         free(path_copy);
         free(path_copy2);
         validated_path[0] = '\0';
-        return -1; // snprintf error or path too long
+        return -ENAMETOOLONG; // snprintf error or path too long
     }
 
     free(path_copy);

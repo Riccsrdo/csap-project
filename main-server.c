@@ -44,6 +44,8 @@ char root_directory[PATH_MAX]; // global variable to hold the root directory pat
 int shm_id = -1, sem_id = -1;
 shared_memory_t *shared_memory = NULL;
 
+volatile sig_atomic_t sessions_cleanup = 0; // flag to indicate that we need to clean up sessions
+
 static void cleanup_ipc(void){
     cleanup_shmem(shm_id, sem_id, shared_memory);
     shm_id = -1;
@@ -58,44 +60,47 @@ void handle_termination(int sig){
     _exit(EXIT_SUCCESS); // exit the process
 }
 
-void handle_signals(int sig) {
-    // wait for all dead processes (SIGCHLD) without blocking
-    (void)sig; 
-    int saved_errno = errno;
-    pid_t pid;
-    while((pid = waitpid(-1, NULL, WNOHANG)) > 0){
-        if(pid < 0) {
-            if(errno == ECHILD) break; // no more child processes
-            else {
-                perror("waitpid");
-                break;
-            }
-        }
-        // clean entry from sessions table
-        int r = sem_lock(sem_id);
-        if(r < 0) {
-            fprintf(stderr, "Failed to lock semaphore: %s\n", strerror(-r));
-            continue;
-        }
+void handle_signals(int sig){
+    (void)sig;
 
-        // look for the entry with the matching pid and mark it as not in use
-        for(int i = 0; i < shared_memory->session_table.count; i++) {
-            if(shared_memory->session_table.entries[i].pid == pid) {
-                shared_memory->session_table.entries[i].in_use = 0;
-                // clean everything else in the entry
-                memset(shared_memory->session_table.entries[i].username, 0, sizeof(shared_memory->session_table.entries[i].username));
-                shared_memory->session_table.entries[i].pid = -1;
-                break;
-            }
+    int saved_errno = errno; // save errno to restore it later
+    while(waitpid(-1, NULL, WNOHANG) > 0) {
+        sessions_cleanup = 1; // set the flag to indicate that we need to clean up sessions
+    }
+    errno = saved_errno; // restore errno
+}
+
+static void collect_stale_sessions(){
+    sessions_cleanup = 0; // reset the flag
+
+    if(shared_memory == NULL || sem_id < 0) {
+        return;
+    }
+
+    int r = sem_lock(sem_id);
+    if(r<0){
+        fprintf(stderr, "Failed to lock semaphore for session cleanup: %s\n", strerror(-r));
+        sessions_cleanup = 1; // set the flag to indicate that we need to clean up sessions
+        return;
+    }
+
+    session_table_t *table = &shared_memory->session_table;
+    for(int i = 0; i < table->count; i++) {
+        if(!table->entries[i].in_use) {
+            continue; // skip entries currenly being used
         }
-        
-        r = sem_unlock(sem_id);
-        if(r < 0) {
-            fprintf(stderr, "Failed to unlock semaphore: %s\n", strerror(-r));
-            continue;
+        if(kill(table->entries[i].pid, 0) == -1 && errno == ESRCH) {
+            // process does not exist, mark the session as not in use
+            table->entries[i].in_use = 0;
+            memset(&table->entries[i], 0, sizeof(session_entry_t)); // clear the entry
+            table->entries[i].pid = -1; 
         }
     }
-    errno = saved_errno;
+
+    r = sem_unlock(sem_id);
+    if(r < 0){
+        fprintf(stderr, "Failed to unlock semaphore for session cleanup: %s\n", strerror(-r));
+    }
 }
 
 int setup_signal_handler() {
@@ -177,7 +182,29 @@ void configure_read_set(fd_set *readfds, int socket_fd) {
     FD_SET(socket_fd, readfds); // add the socket to the set
 }
 
-
+/*
+Function used to return correct error message related to errno outputted by validate_path function.
+*/
+static const char *path_error_reason(int err) {
+    switch(err) {
+        case EPERM:        
+            return "Path outside of allowed scope";
+        case ENOENT:       
+            return "No such file or directory (check the parent directory)";
+        case ENAMETOOLONG: 
+            return "Path or file name too long";
+        case EACCES:       
+            return "Permission denied on a path component";
+        case ELOOP:        
+            return "Too many symbolic links in path";
+        case ENOTDIR:      
+            return "A component of the path is not a directory";
+        case ENOMEM:       
+            return "Out of memory while resolving the path";
+        default:           
+            return "Invalid path";
+    }
+}
 
 
 void dispatch(session_t *session, int clientSocket, uint8_t command, void *payload, uint32_t payload_len) {
@@ -390,9 +417,14 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 send_err(clientSocket, -r, "Failed to lock semaphore");
                 return;
             }
+            
             int found = 0;
-            transfer_request_entry_t *request = NULL;
-            for(int i = 0; i < shared_memory->pending_requests_table.count; i++) {
+            // copy locally the entry of shmem
+            transfer_request_entry_t request_copy;
+            int request_index = -1;
+            memset(&request_copy, 0, sizeof(request_copy));
+            for(int i = 0; i< shared_memory->pending_requests_table.count; i++){
+                // found request, copy it and mark it as found
                 if(shared_memory->pending_requests_table.entries[i].id == request_id) {
                     if(strcmp(shared_memory->pending_requests_table.entries[i].dest_username, session->user) != 0) {
                         r = sem_unlock(sem_id);
@@ -403,12 +435,13 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                         send_err(clientSocket, EACCES, reason);
                         return;
                     }
-                    // copy request pointer to use later
-                    request = &shared_memory->pending_requests_table.entries[i];
+                    request_copy = shared_memory->pending_requests_table.entries[i];
+                    request_index = i;
                     found = 1;
                     break;
                 }
             }
+
             r = sem_unlock(sem_id);
             if(r < 0) {
                 send_err(clientSocket, -r, "Failed to unlock semaphore");
@@ -424,8 +457,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_dest_path[PATH_MAX];
             r = validate_path(accept_command.buf, session->home_path, full_dest_path);
             if(r < 0) {
-                const char *reason = "Destination path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -436,7 +468,15 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 send_err(clientSocket, -r, "Failed to lock semaphore");
                 return;
             }
-            request->status = ACCEPTED;
+            //  check if req is still valid, looking if it has not been accepted or rejected by another process in the meantime
+            if(request_index < 0 ||
+               shared_memory->pending_requests_table.entries[request_index].id != request_copy.id) {
+                sem_unlock(sem_id);
+                send_err(clientSocket, ENOENT, "Request no longer available");
+                return;
+            }
+            shared_memory->pending_requests_table.entries[request_index].status = ACCEPTED;
+
             r = sem_unlock(sem_id);
             if(r < 0) {
                 send_err(clientSocket, -r, "Failed to unlock semaphore");
@@ -454,7 +494,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
             for(int i = 0; i < shared_memory->session_table.count; i++) {
-                if(strcmp(shared_memory->session_table.entries[i].username, request->source_username) == 0) {
+                if(strcmp(shared_memory->session_table.entries[i].username, request_copy.source_username) == 0) { 
                     source_user_found = 1;
                     source_user_pid = shared_memory->session_table.entries[i].pid;
                     if(shared_memory->session_table.entries[i].in_use == 1) {
@@ -478,7 +518,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
 
             // extract the basename of the source file
             char src_path_copy[PATH_MAX];
-            strncpy(src_path_copy, request->file_path_absolute, sizeof(src_path_copy) - 1);
+            strncpy(src_path_copy, request_copy.file_path_absolute, sizeof(src_path_copy) - 1);
             src_path_copy[sizeof(src_path_copy) - 1] = '\0';
             char *base_name = basename(src_path_copy);
 
@@ -487,7 +527,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             snprintf(full_dest_file_path, sizeof(full_dest_file_path), "%s/%.*s", full_dest_path, NAME_MAX, base_name);
 
             // copy the file from source to destination
-            int copy_result = execute_transfer_copy(request->file_path_absolute, full_dest_file_path);
+            int copy_result = execute_transfer_copy(request_copy.file_path_absolute, full_dest_file_path);
             if(copy_result < 0) {
                 request_failure = 1;
             }
@@ -499,7 +539,10 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                     send_err(clientSocket, -r, "Failed to lock semaphore");
                     return;
                 }
-                request->status = FAILED;
+                if(request_index >= 0 &&
+                   shared_memory->pending_requests_table.entries[request_index].id == request_copy.id) {
+                    shared_memory->pending_requests_table.entries[request_index].status = FAILED;
+                }
                 r = sem_unlock(sem_id);
                 if(r < 0) {
                     send_err(clientSocket, -r, "Failed to unlock semaphore");
@@ -523,9 +566,9 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 // depending on the result of the copy operation, send either ACCEPT or FAIL message to the source user process through the FIFO
                 char request_status_str[PATH_MAX + 64];
                 if(request_failure) {
-                    snprintf(request_status_str, sizeof(request_status_str), "FAIL|%d|%d\n", request->id, -copy_result);
+                    snprintf(request_status_str, sizeof(request_status_str), "FAIL|%d|%d\n", request_copy.id, -copy_result);
                 } else {
-                    snprintf(request_status_str, sizeof(request_status_str), "ACCEPT|%d|%s\n", request->id, request->file_path_absolute);
+                    snprintf(request_status_str, sizeof(request_status_str), "ACCEPT|%d|%s\n", request_copy.id, request_copy.file_path_absolute);
                 }
 
                 ssize_t bytes_written = write(fifo_fd, request_status_str, strlen(request_status_str));
@@ -576,8 +619,13 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
             int found = 0;
-            transfer_request_entry_t *request = NULL;
-            for(int i = 0; i < shared_memory->pending_requests_table.count; i++) {
+            // copy locally the entry of the request to avoid holding the semaphore while notifying the source user
+            transfer_request_entry_t request_copy;
+            int request_index = -1;
+            memset(&request_copy, 0, sizeof(request_copy));
+
+            for(int i = 0; i< shared_memory->pending_requests_table.count; i++){
+                // if it's the request we're looking for, copy it and mark it as found
                 if(shared_memory->pending_requests_table.entries[i].id == request_id) {
                     if(strcmp(shared_memory->pending_requests_table.entries[i].dest_username, session->user) != 0) {
                         r = sem_unlock(sem_id);
@@ -588,8 +636,9 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                         send_err(clientSocket, EACCES, reason);
                         return;
                     }
+                    request_copy = shared_memory->pending_requests_table.entries[i];
+                    request_index = i;
                     found = 1;
-                    request = &shared_memory->pending_requests_table.entries[i];
                     break;
                 }
             }
@@ -612,7 +661,16 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 send_err(clientSocket, -r, "Failed to lock semaphore");
                 return;
             }
-            request->status = REJECTED;
+
+            // check if the request is still valid, for example if it has not been accepted or rejected by another process in the meantime
+            if(request_index < 0 ||
+               shared_memory->pending_requests_table.entries[request_index].id != request_copy.id) {
+                sem_unlock(sem_id);
+                send_err(clientSocket, ENOENT, "Request no longer available");
+                return;
+            }
+            shared_memory->pending_requests_table.entries[request_index].status = REJECTED;
+
             r = sem_unlock(sem_id);
             if(r < 0) {
                 send_err(clientSocket, -r, "Failed to unlock semaphore");
@@ -630,7 +688,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
             for(int i = 0; i < shared_memory->session_table.count; i++) {
-                if(strcmp(shared_memory->session_table.entries[i].username, request->source_username) == 0) {
+                if(strcmp(shared_memory->session_table.entries[i].username, request_copy.source_username) == 0) {
                     source_user_found = 1;
                     source_user_pid = shared_memory->session_table.entries[i].pid;
                     if(shared_memory->session_table.entries[i].in_use == 1) {
@@ -666,7 +724,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
 
                 // send the transfer request ID and the file path to the source user process through the FIFO
                 char request_id_str[PATH_MAX + 64];
-                snprintf(request_id_str, sizeof(request_id_str), "REJECT|%d\n", request->id);
+                snprintf(request_id_str, sizeof(request_id_str), "REJECT|%d\n", request_copy.id);
                 ssize_t bytes_written = write(fifo_fd, request_id_str, strlen(request_id_str));
                 if(bytes_written < 0) {
                     const char *reason = "Failed to write to FIFO for source user";
@@ -695,8 +753,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_src_path[PATH_MAX];
             int r = validate_path(transfer_command.buf, session->home_path, full_src_path);
             if(r < 0) {
-                const char *reason = "Source path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -851,8 +908,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_path[PATH_MAX];
             int r = validate_path(create_command.buf, session->home_path, full_path);
             if(r < 0) {
-                const char *reason = "Path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -888,8 +944,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_path[PATH_MAX];
             int r = validate_path(chmod_command.buf, session->home_path, full_path);
             if(r < 0) {
-                const char *reason = "Path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -924,8 +979,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_src_path[PATH_MAX];
             int r = validate_path(move_command.buf, session->home_path, full_src_path);
             if(r < 0) {
-                const char *reason = "Source path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -933,8 +987,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_dest_path[PATH_MAX];
             r = validate_path(move_command.buf2, session->home_path, full_dest_path);
             if(r < 0) {
-                const char *reason = "Destination path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -1039,8 +1092,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_path[PATH_MAX];
             int r = validate_path(cd_command.buf, session->home_path, full_path);
             if(r < 0) {
-                const char *reason = "Path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -1067,8 +1119,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_path[PATH_MAX];
             int r = validate_path(download_command.buf, session->home_path, full_path);
             if(r < 0) {
-                const char *reason = "Path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -1147,8 +1198,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_path[PATH_MAX];
             int r = validate_path(read_command.buf, session->home_path, full_path);
             if(r < 0) {
-                const char *reason = "Path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -1235,8 +1285,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_path[PATH_MAX];
             int r = validate_path(upload_command.buf2, session->home_path, full_path);
             if(r < 0) {
-                const char *reason = "Path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -1355,8 +1404,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_path[PATH_MAX];
             int r = validate_path(write_command.buf, session->home_path, full_path);
             if(r < 0) {
-                const char *reason = "Path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -1508,8 +1556,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             char full_path[PATH_MAX];
             int r = validate_path(delete_command.buf, session->home_path, full_path);
             if(r < 0) {
-                const char *reason = "Path outside of allowed scope";
-                send_err(clientSocket, EINVAL, reason);
+                send_err(clientSocket, -r, path_error_reason(-r));
                 return;
             }
 
@@ -1612,8 +1659,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 // allowed scope: root_path (for all other commands is home_path)
                 r = validate_path(list_command.buf, session->root_path, full_path);
                 if(r < 0) {
-                    const char *reason = "Path outside of allowed scope";
-                    send_err(clientSocket, EINVAL, reason);
+                    send_err(clientSocket, -r, path_error_reason(-r));
                     return;
                 }
             }
@@ -1988,6 +2034,11 @@ int main(int argc, char *argv[]) {
     printf("[SETUP]: Server loop started. \tType 'exit' to close\n");
 
     while(1){
+        // clean sessions table outside signal handler for SIGCHLD
+        if(sessions_cleanup){
+            collect_stale_sessions();
+        }
+
         // clean file descriptor set
         configure_read_set(&readfds, s);
 

@@ -16,6 +16,7 @@
 #include"../utils/utils.h" // fix with makefile -I
 #include<pwd.h>
 #include<grp.h>
+#include<libgen.h>
 
 int list(char *path, strbuf_t *sb);
 

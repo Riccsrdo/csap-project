@@ -8,12 +8,10 @@ Responsible for:
 - overall cleanup of resources.
 */
 
-#include <asm-generic/errno.h>
 #include<netinet/in.h> // Address information
 #include<stdio.h>
 #include<stdlib.h>
 #include<sys/socket.h> // Socket APIs
-#include<sys/types.h>
 #include<arpa/inet.h> // inet_pton
 #include<string.h>
 #include<unistd.h>
@@ -470,7 +468,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             }
             //  check if req is still valid, looking if it has not been accepted or rejected by another process in the meantime
             if(request_index < 0 ||
-               shared_memory->pending_requests_table.entries[request_index].id != request_copy.id) {
+               shared_memory->pending_requests_table.entries[request_index].id != request_copy.id ||
+               shared_memory->pending_requests_table.entries[request_index].status != PENDING) {
                 sem_unlock(sem_id);
                 send_err(clientSocket, ENOENT, "Request no longer available");
                 return;
@@ -664,7 +663,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
 
             // check if the request is still valid, for example if it has not been accepted or rejected by another process in the meantime
             if(request_index < 0 ||
-               shared_memory->pending_requests_table.entries[request_index].id != request_copy.id) {
+               shared_memory->pending_requests_table.entries[request_index].id != request_copy.id ||
+               shared_memory->pending_requests_table.entries[request_index].status != PENDING) {
                 sem_unlock(sem_id);
                 send_err(clientSocket, ENOENT, "Request no longer available");
                 return;
@@ -794,7 +794,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 struct passwd *pwd = getpwnam(transfer_command.buf2);
                 char dest_user_home[PATH_MAX + NAME_MAX + 2]; // +2 for '/' and '\0'
                 struct stat dest_home_stat;
-                snprintf(dest_user_home, sizeof(dest_user_home), "%s/%s", session->root_path, transfer_command.buf2);
+                snprintf(dest_user_home, sizeof(dest_user_home), "%s/%.32s", session->root_path, transfer_command.buf2);
 
                 if(pwd == NULL || !is_csap_user(pwd) || stat(dest_user_home, &dest_home_stat) < 0 || !S_ISDIR(dest_home_stat.st_mode)) {
                     const char *reason = "Destination user does not exist";
@@ -1020,37 +1020,74 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 }
             }
 
+            char dest_path_final[PATH_MAX + NAME_MAX + 2]; // +2 for '/' and '\0'
+            strncpy(dest_path_final, full_dest_path, sizeof(dest_path_final) - 1);
+            dest_path_final[sizeof(dest_path_final) - 1] = '\0';
+
             // no lock if src is a dir, as rename() of a dir is atomic
 
-            // check if destination exists, if so acquire write lock on it
-            if(stat(full_dest_path, &dest_stat) == 0) {
-                dest_fd = open(full_dest_path, O_RDWR);
-                if(dest_fd < 0) {
-                    const char *reason = "Failed to open destination file for locking";
-                    send_err(clientSocket, errno, reason);
-                    if(src_fd >= 0) {
-                        release_lock(src_fd, 0, 0);
-                        close(src_fd);
+            // check if destination exists, if it's a file acquire write lock, if is a dir create a file with provided path + / + basename
+            if(stat(dest_path_final, &dest_stat) == 0) {
+                if(S_ISREG(dest_stat.st_mode)) {
+                    dest_fd = open(dest_path_final, O_RDWR);
+                    if(dest_fd < 0) {
+                        const char *reason = "Failed to open destination file for locking";
+                        send_err(clientSocket, errno, reason);
+                        if(src_fd >= 0) {
+                            release_lock(src_fd, 0, 0);
+                            close(src_fd);
+                        }
+                        return;
                     }
-                    return;
+
                 }
 
-                int r = acquire_write_lock(dest_fd, 0, 0);
-                if(r<0) {
-                    const char *reason = "Failed to acquire write lock on destination file";
-                    send_err(clientSocket, -r, reason);
-                    if(src_fd >= 0) {
-                        release_lock(src_fd, 0, 0);
-                        close(src_fd);
+                if(S_ISDIR(dest_stat.st_mode)){
+
+                    char src_path_copy[PATH_MAX];
+                    strncpy(src_path_copy, full_src_path, sizeof(src_path_copy) - 1);
+                    src_path_copy[sizeof(src_path_copy) - 1] = '\0';
+                    char *base_name = basename(src_path_copy);
+
+                    char dest[PATH_MAX + NAME_MAX + 2]; // +2 for '/' and '\0'
+
+                    snprintf(dest, sizeof(dest), "%s/%s", full_dest_path, base_name);
+                    strncpy(dest_path_final, dest, sizeof(dest_path_final) - 1);
+                    dest_path_final[sizeof(dest_path_final) - 1] = '\0';
+
+                    // create the file in the destination directory with the same basename as the source file
+                    dest_fd = open(dest_path_final, O_RDWR | O_CREAT | O_EXCL, src_stat.st_mode & 0777);
+                    if(dest_fd < 0) {
+                        const char *reason = "Failed to create destination file in directory";
+                        send_err(clientSocket, errno, reason);
+                        if(src_fd >= 0) {
+                            release_lock(src_fd, 0, 0);
+                            close(src_fd);
+                        }
+                        return;
                     }
-                    close(dest_fd);
-                    return;
                 }
-            
+
+                
+            }
+
+            r = acquire_write_lock(dest_fd, 0, 0);
+            if(r<0) {
+                const char *reason = "Failed to acquire write lock on destination file";
+                send_err(clientSocket, -r, reason);
+                if(src_fd >= 0) {
+                    release_lock(src_fd, 0, 0);
+                    close(src_fd);
+                }
+                if(dest_fd >= 0) {
+                    release_lock(dest_fd, 0, 0);
+                    close(dest_fd);
+                }
+                return;
             }
             
 
-            int move_result = move_cmd(full_src_path, full_dest_path);
+            int move_result = move_cmd(full_src_path, dest_path_final);
             if(move_result < 0) {
 
                 if(src_fd >= 0) {
@@ -1309,8 +1346,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             // check if destination file exists
             int existed = (stat(full_path, &dest_stat) == 0);
 
-            // open the destination with O_WRONLY | O_CREAT
-            int lock_fd = open(full_path, O_WRONLY | O_CREAT, 0700);
+            // open the destination with O_WRONLY | O_CREAT | O_NOFOLLOW to avoid following symlinks, and with 0700 permissions
+            int lock_fd = open(full_path, O_WRONLY | O_CREAT | O_NOFOLLOW, 0700);
             if(lock_fd < 0) {
                 const char *reason = "Failed to open destination file for locking";
                 send_err(clientSocket, errno, reason);
@@ -1423,7 +1460,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             temp_path[0] = '\0';
             int file_fd;
             if(offset >= 0) {
-                file_fd = open(full_path, O_WRONLY | O_CREAT, 0700);
+                file_fd = open(full_path, O_WRONLY | O_CREAT | O_NOFOLLOW, 0700);
                 if(file_fd < 0) {
                     const char *reason = "Failed to open file for writing";
                     send_err(clientSocket, errno, reason);
@@ -1439,6 +1476,9 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 }
             }
 
+            // check if file existed
+            int existed = (stat(full_path, &dest_stat) == 0);
+
             int lock_fd = -1;
 
             // I set the lock on the actual file on which we want to write, and to check which one to lock
@@ -1448,14 +1488,14 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 // there is an offset, so lock_fd = file_fd
                 lock_fd = file_fd;
             } else {
-                lock_fd = open(full_path, O_WRONLY | O_CREAT, 0700);
+                lock_fd = open(full_path, O_WRONLY | O_CREAT | O_NOFOLLOW, 0700);
                 if(lock_fd < 0) {
                     const char *reason = "Failed to open file for locking";
                     send_err(clientSocket, errno, reason);
                     close(file_fd);
                     if(temp_path[0] != '\0') {
                         unlink(temp_path); // remove temp file
-                    }
+                    }                   
                     return;
                 }
             }
@@ -1472,6 +1512,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 if(temp_path[0] != '\0') {
                     unlink(temp_path); // remove temp file
                 }
+                if(!existed) unlink(full_path); // remove destination if it did not exist before 
                 return;
             }
 
@@ -1486,6 +1527,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
 
             ssize_t stream_result = recv_stream(clientSocket, file_fd, offset, -1, data_code, end_code, error_msg, err_size);
             if(stream_result < 0) {
+                if(!existed) unlink(full_path);
                 if(lock_fd >=0 && lock_fd != file_fd) {
                     release_lock(lock_fd, 0, 0);
                     close(lock_fd);
@@ -1506,28 +1548,35 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 // restore the permissions of the destination and commit to effective file
                 if(fchmod(file_fd, dest_mode) < 0) {
                     int saved = errno;
-                    release_lock(file_fd, 0, 0);
+                    release_lock(lock_fd, 0, 0);
+                    close(lock_fd);
                     close(file_fd);
                     unlink(temp_path);
+                    if(!existed) unlink(full_path);
                     send_err(clientSocket, saved, "Failed to set permissions on written file");
                     return;
                 }
                 if(close(file_fd) < 0) {
                     int saved = errno;
-                    release_lock(file_fd, 0, 0);
+                    release_lock(lock_fd, 0, 0);
+                    close(lock_fd);
                     unlink(temp_path);
+                    if(!existed) unlink(full_path);
                     send_err(clientSocket, saved, "Failed to close temporary file");
                     return;
                 }
                 if(rename(temp_path, full_path) < 0) {
                     int saved = errno;
-                    release_lock(file_fd, 0, 0);
+                    release_lock(lock_fd, 0, 0);
+                    close(lock_fd);
                     unlink(temp_path);
+                    if(!existed) unlink(full_path);
                     send_err(clientSocket, saved, "Failed to install written file");
                     return;
                 }
             } else {    
-                release_lock(file_fd, 0, 0);
+                release_lock(lock_fd, 0, 0);
+                close(lock_fd);
                 close(file_fd);
                 lock_fd = -1;
             }
@@ -1651,10 +1700,6 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                     return;
                 }
             }
-
-
-
-            // TODO: lock on file
 
             // call list() in fsops
             strbuf_t sb;
@@ -1869,7 +1914,6 @@ void handle_session(int clientSocket) {
         unlink(fifo_name); // remove the fifo
     }
     session.logged_in = 0; // mark as logged out
-    // TODO: any other cleanup if necessary
 }
 
 
@@ -2098,7 +2142,6 @@ int main(int argc, char *argv[]) {
                 _exit(0); // after client session is handled, exit the child process
             } else { // parent process
                 close(clientSocket); // parent does not need the connected socket
-                // TODO: implement parent process logic
             }
         }
 

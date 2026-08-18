@@ -20,7 +20,7 @@ typedef struct{
     int argc; // number of arguments
     char buf[PATH_MAX]; // buffer for data
     char buf2[PATH_MAX]; // additional buffer for data, if needed
-} cmd_t; // reminder for me: copy cmd_t using pointer
+} cmd_t;
 
 
 

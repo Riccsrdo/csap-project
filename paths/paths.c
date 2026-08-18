@@ -5,7 +5,7 @@ Responsible for:
 - Sandbox validation;
 */
 #include"paths.h"
-#include <asm-generic/errno.h>
+
 
 /* To validate the scope of user operations,
 call validate_path and look for the result

@@ -150,16 +150,16 @@ int send_err(int fd, int err_code, const char *payload){
 
 int recv_frame_into(int sockfd, void *buf, size_t buf_cap, uint8_t *status, uint32_t *payload_len){
     if(recv_header(sockfd, status, payload_len) < 0){
-        return -1;
+        return -EPROTO;
     }
 
     if(*payload_len > buf_cap){
-        return -1; // buffer too small
+        return -EIO; // buffer too small
     }
 
     if(*payload_len > 0){
         if(receive_data(sockfd, buf, *payload_len) < 0){
-            return -1;
+            return -EPROTO;
         }
     }
     return 0;

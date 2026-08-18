@@ -173,11 +173,6 @@ Permissions changed successfully
 Moves by renaming a file or directory to required path (needs to be inside user's home).
 
 ```
-move test.txt test_directory/
-[ERROR]: Failed to open destination file for locking (Is a directory)
-```
-You need to specify the already constructed path name, so:
-```
 move test.txt test_directory/test.txt
 [Server]: 
 File/Directory moved successfully

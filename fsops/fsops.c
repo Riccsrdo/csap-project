@@ -1,7 +1,7 @@
 /* fsops.c
 
 Responsible for:
-- create, chmod, move, delete, cd, list ✅, read, write.
+- create, chmod, move, delete, cd, list.
 */
 #include"fsops.h"
 

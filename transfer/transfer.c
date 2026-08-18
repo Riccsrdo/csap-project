@@ -82,7 +82,8 @@ int execute_transfer_copy(const char *src_path, const char *dest_path){
     // perform the copy
     char buffer[4096];
     ssize_t bytes_read;
-    while((bytes_read = read(src_fd, buffer, sizeof(buffer))) > 0){
+    while(1){
+        bytes_read = read(src_fd, buffer, sizeof(buffer));
         if(bytes_read < 0){
             if(errno == EINTR) continue; 
             break;
@@ -102,7 +103,7 @@ int execute_transfer_copy(const char *src_path, const char *dest_path){
     }
 
     // release locks and close file descriptors
-    int read_errno = (bytes_read < 0) ? -errno : 0; // capture read error if any
+    int read_errno = (bytes_read < 0) ? errno : 0; // capture read error if any
     release_lock(src_fd, 0, 0);
     release_lock(dest_fd, 0, 0);
     close(src_fd);
@@ -138,7 +139,7 @@ ssize_t send_stream_buf(int sockfd, const char *buf, size_t len, uint8_t data_co
         sent += chunk;
     }
 
-    // frame finale senza payload per segnalare la fine dello stream
+    // final frame with end_code and no payload to indicate the end of the stream
     if(send_packet(sockfd, end_code, NULL, 0) < 0){
         return -EIO;
     }

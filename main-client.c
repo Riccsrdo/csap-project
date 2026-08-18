@@ -25,8 +25,8 @@ Responsible for:
 #include "transfer/transfer.h"
 #include"utils/utils.h" // fix with -I
 
-#define MAX_CLIENT_BUFFER 1024
-#define MAX_SERVER_BUFFER 1024
+#define MAX_CLIENT_BUFFER PATH_MAX + 64
+#define MAX_SERVER_BUFFER PATH_MAX + 64
 
 
 char *ip_address; // global variable to hold the IP address
@@ -417,24 +417,6 @@ int main(int argc, char *argv[]) {
             
             // parse command, using appropriate function, and then send it to server
 
-            // if -b option is contained in upload/download command, fork a child 
-            // process to handle the command in background, and use the pipe to communicate with the main process
-            /* TODO: implement mechanism for -b
-            fflush(NULL);
-            pid_t pid = fork();
-            if(pid < 0) {
-                perror("fork");
-                continue; // continue to next iteration on error
-            } else if(pid == 0) { // child process
-                close(pipe_fd[0]); // close read end of the pipe in the child
-                // handle the command and write output to pipe_fd[1]
-                // after handling, exit the child process
-                _exit(0);
-            } else { // parent process
-                // continue to next iteration to wait for more input or server response
-            }
-                */
-
             char line[MAX_CLIENT_BUFFER];
             int stdin_eof = 0; // flag to indicate if EOF has been reached on stdin
             ssize_t bytes_read = read_line(STDIN_FILENO, line, sizeof(line), &stdin_eof);
@@ -530,7 +512,7 @@ int main(int argc, char *argv[]) {
                 break; // exit the loop on error
             }
             if(command == RSP_NOTIFY){
-                printf("%s \n", (char *)payload);
+                printf("[NOTIFY]: %s \n", (char *)payload);
                 free(payload);
                 continue;
             } else {

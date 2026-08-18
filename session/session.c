@@ -7,6 +7,9 @@ Responsible for:
 - privileges (with seteuid).
 */
 #include"session.h"
+#include <stdio.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 gid_t server_gid = 0;
 
@@ -144,6 +147,8 @@ int setup_server_gid(char *error_msg, uint32_t err_size) {
 
 int handle_create_user(const char* username, mode_t perms, const char *root, char *err_msg, uint32_t err_size) {
 
+    uid_t saved_uid = getuid();
+
     if(validate_username(username, err_msg, err_size) < 0) {
         err_msg[err_size - 1] = '\0';
         return -1;
@@ -155,6 +160,12 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
         return -1;
     }
 
+    if(seteuid((uid_t)0)<0){
+        snprintf(err_msg, err_size - 1, "Failed to set effective UID to root: %s", strerror(errno));
+        err_msg[err_size - 1] = '\0';
+        return -1;
+    }
+
     struct passwd *pwd = getpwnam(username);
     if(pwd == NULL) {
         // check if the server is running as root, if not return error
@@ -162,6 +173,7 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
             strncpy(err_msg, "Server must be run as root to create users", err_size - 1);
             errno = EPERM;
             err_msg[err_size - 1] = '\0';
+            seteuid(saved_uid);
             return -1;
         }
 
@@ -177,6 +189,7 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
             sigprocmask(SIG_SETMASK, &old_mask, NULL);
             strncpy(err_msg, "Failed to fork for user creation", err_size - 1);
             err_msg[err_size - 1] = '\0';
+            seteuid(saved_uid);
             return -1;
         } else if(pid == 0) { // child process
             // set the group for the new user to the server's group
@@ -196,11 +209,13 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
                 if(!new_pwd) {
                     strncpy(err_msg, "Failed to get new user info", err_size - 1);
                     err_msg[err_size - 1] = '\0';
+                    seteuid(saved_uid);
                     return -1;
                 }
 
                 int result = create_home_directory(root, username, err_msg, err_size, perms, new_pwd);
                 if(result < 0) {
+                    seteuid(saved_uid);
                     return -1;
                 }
 
@@ -209,11 +224,17 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
             else {
                 strncpy(err_msg, "Failed to create user", err_size - 1);
                 err_msg[err_size - 1] = '\0';
+                seteuid(saved_uid);
                 return -1;
             }
         }
     }
-    
+
+    // go back to saved uid
+    if(seteuid(saved_uid) < 0) {
+        snprintf(err_msg, err_size -1, "Failed to perform a drop of privileges: %s", strerror(errno));
+        return -1;
+    }
 
     if(!is_csap_user(pwd)) {
         strncpy(err_msg, "User is not a valid CSAP user", err_size - 1);
@@ -232,12 +253,17 @@ int handle_create_user(const char* username, mode_t perms, const char *root, cha
 }
 
 int handle_login(session_t *session, char *username, char *err_msg, uint32_t err_size) {
-    // TODO: Authentication mechanism here
 
     // check if the user exists in the system
     struct passwd *pwd = getpwnam(username);
     if(pwd == NULL) {
         strncpy(err_msg, "User does not exist", err_size - 1);
+        err_msg[err_size - 1] = '\0';
+        return -1;
+    }
+
+    if(!is_csap_user(pwd)) {
+        strncpy(err_msg, "User is not a valid CSAP user", err_size - 1);
         err_msg[err_size - 1] = '\0';
         return -1;
     }
@@ -287,7 +313,7 @@ int handle_login(session_t *session, char *username, char *err_msg, uint32_t err
     }
 
     // set cwd of the user to their home directory
-    if(chdir(home_dir) < 0) {
+    if(chdir(resolved_home) < 0) {
         snprintf(err_msg, err_size - 1, "Failed to change directory to user's home: %s", strerror(errno));
         err_msg[err_size - 1] = '\0';
         close(n_fd);

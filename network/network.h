@@ -32,7 +32,8 @@ enum { CMD_LOGIN = 1, CMD_CREATE_USER, CMD_LIST, CMD_CD, CMD_CREATE, CMD_CHMOD,
 // Answer codes for Server to Client communication
 enum { RSP_OK = 100, RSP_ERR, RSP_DATA, RSP_DATA_END, RSP_NOTIFY };
 
-       
+int make_endpoint(const char *ip, const char *port, struct sockaddr_in *out);
+
 int send_data(int sockfd, const void *buf, size_t len);
 int receive_data(int sockfd, void *buf, size_t len);
 int build_packet(char *buf, uint8_t command, const char *payload, uint32_t payload_len);
@@ -44,6 +45,7 @@ int recv_packet(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len);
 // Used by the server to notify about the status of a command, with an optional payload (e.g. error message)
 
 int send_ok(int fd, const char *payload, uint32_t payload_len);
+int send_ok_str(int fd, const char *msg);
 int send_err(int fd, int err_code, const char *payload);
 
 int recv_frame_into(int sockfd, void *buf, size_t buf_cap, uint8_t *status, uint32_t *payload_len);

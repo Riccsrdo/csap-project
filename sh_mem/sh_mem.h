@@ -9,6 +9,10 @@
 #include<errno.h>
 #include<sys/sem.h>
 #include<string.h>
+#include<signal.h>
+#include<stdio.h>
+#include<unistd.h>
+#include<sys/types.h>
 
 #define MAX_ENTRIES 1024
 
@@ -71,5 +75,15 @@ int sem_lock(int sem_id);
 int sem_unlock(int sem_id);
 
 void cleanup_shmem(int shm_id, int sem_id, shared_memory_t *shm_ptr);
+
+int shm_session_add(shared_memory_t *mem, int sem, const char *user, pid_t pid);
+int shm_session_find(shared_memory_t *mem, int sem, const char *user, pid_t *pid, int *online);
+int shm_sessions_collect_stale(shared_memory_t *mem, int sem);
+
+int shm_request_add(shared_memory_t *mem, int sem, const char *src_user, const char *dest_user, const char *abs_path);
+int shm_request_take(shared_memory_t *mem, int sem, int id, const char *dest_user, enum request_status new_status, transfer_request_entry_t *out);
+int shm_request_set(shared_memory_t *mem, int sem, int id, enum request_status st);
+int shm_requests_set_failed(shared_memory_t *mem, int sem, const char *user);
+int shm_requests_for_dest(shared_memory_t *mem, int sem, const char *user, transfer_request_entry_t *out, int max);
 
 #endif

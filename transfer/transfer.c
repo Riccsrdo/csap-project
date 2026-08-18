@@ -6,6 +6,7 @@ Responsible for:
 - transfer_request/accept/reject;
 */
 #include"transfer.h"
+#include <fcntl.h>
 
 /*
 Used to perform the copy of a file from src_path to dest_path, both absolute paths.
@@ -88,6 +89,11 @@ int execute_transfer_copy(const char *src_path, const char *dest_path){
             if(errno == EINTR) continue; 
             break;
         }
+
+        if(bytes_read == 0){ // EOF
+            break;
+        }
+
         ssize_t bytes_written = write_all(dest_fd, buffer, bytes_read);
         if(bytes_written < 0){
             release_lock(src_fd, 0, 0);
@@ -259,4 +265,320 @@ ssize_t recv_stream(int sockfd, int fd, off_t offset, int64_t expected_total, ui
     }
 
     return total_bytes_received;
+}
+
+
+/*
+Receives a stream from socket and writes it into target->path, starting at target->offset.
+Takes lock on target file.
+
+Returns the number of bytes written on success, or a negative error code on failure.
+*/
+ssize_t receive_into_file(int sockfd, const target_t *target, char *error_msg, size_t err_size){
+    int fd = -1;
+    int lock_fd = -1;
+    int existed = 0; // flag to indicate if the target file already existed
+
+    char temp_path[PATH_MAX];
+    temp_path[0] = '\0'; // empty string
+
+    mode_t dest_mode = 0700; // default permissions for the destination file
+    struct stat dest_stat;
+
+    ssize_t result = -EIO; // default error code
+
+    // read permissions and determine if target file already exists
+    if(stat(target->path, &dest_stat) == 0){
+        existed = 1; // file already exists
+        dest_mode = dest_stat.st_mode & 0777; // preserve existing permissions
+    }
+
+    // if there is an offset
+    if(target->offset >= 0){
+        // open the target file for writing, creating it if it doesn't exist
+        fd = open(target->path, O_WRONLY | O_CREAT | O_NOFOLLOW, 0700);
+        if(fd < 0){
+            result = -errno;
+            snprintf(error_msg, err_size, "Failed to open target file: %s", strerror(-result));
+            if(fd >= 0 && fd != lock_fd){
+                close(fd);
+            }
+            if(lock_fd >= 0){
+                release_lock(lock_fd, 0, 0);
+                close(lock_fd);
+            }
+            if(temp_path[0]){
+                unlink(temp_path);
+            }
+            if(result < 0 && !existed){
+                unlink(target->path);
+            }
+            return result;
+        }
+
+        lock_fd = fd; // use the same fd for locking
+    } else {
+        // open temp file for writing
+        fd = open_temp_for_upload(target->path, temp_path, sizeof(temp_path));
+        if(fd < 0){
+            result = fd; // open_temp_for_upload returns negative error code on failure
+            snprintf(error_msg, err_size, "Failed to open temporary file for upload");
+            
+            if(fd >= 0 && fd != lock_fd){
+                close(fd);
+            }
+            if(lock_fd >= 0){
+                release_lock(lock_fd, 0, 0);
+                close(lock_fd);
+            }
+            if(temp_path[0]){
+                unlink(temp_path);
+            }
+            if(result < 0 && !existed){
+                unlink(target->path);
+            }
+            return result;
+        }
+
+        lock_fd = open(target->path, O_WRONLY | O_CREAT | O_NOFOLLOW, 0700);
+        if(lock_fd < 0){
+            result = -errno;
+            snprintf(error_msg, err_size, "Failed to open target file for locking");
+            if(fd >= 0 && fd != lock_fd){
+                close(fd);
+            }
+            if(lock_fd >= 0){
+                release_lock(lock_fd, 0, 0);
+                close(lock_fd);
+            }
+            if(temp_path[0]){
+                unlink(temp_path);
+            }
+            if(result < 0 && !existed){
+                unlink(target->path);
+            }
+            return result;
+        }
+
+    }
+
+    result = acquire_write_lock(lock_fd, 0, 0);
+    if(result < 0){
+        snprintf(error_msg, err_size, "Failed to acquire write lock on target file");
+        if(fd >= 0 && fd != lock_fd){
+            close(fd);
+        }
+        if(lock_fd >= 0){
+            release_lock(lock_fd, 0, 0);
+            close(lock_fd);
+        }
+        if(temp_path[0]){
+            unlink(temp_path);
+        }
+        if(result < 0 && !existed){
+            unlink(target->path);
+        }
+        return result;
+    }
+
+    // tell client to start sending data
+    send_ok_str(sockfd, "Ready to receive data");
+
+    result = recv_stream(sockfd, fd, target->offset, -1, target->data_code, target->end_code, error_msg, err_size);
+
+    if(result <0 ){
+        if(error_msg && err_size && error_msg[0] == '\0'){
+            snprintf(error_msg, err_size, "Failed to receive stream: %s", strerror(-result));
+        }
+
+        if(fd >= 0 && fd != lock_fd){
+            close(fd);
+        }
+        if(lock_fd >= 0){
+            release_lock(lock_fd, 0, 0);
+            close(lock_fd);
+        }
+        if(temp_path[0]){
+            unlink(temp_path);
+        }
+        if(result < 0 && !existed){
+            unlink(target->path);
+        }
+        return result;
+    }
+
+    if(temp_path[0] != '\0'){
+        // if a temp file was used, rename it to the target path
+        
+        // first apply correct permissions to the temp file
+        if(fchmod(fd, dest_mode) < 0){
+            result = -errno;
+            snprintf(error_msg, err_size, "Failed to set permissions on temporary file: %s", strerror(-result));
+            if(fd >= 0 && fd != lock_fd){
+            close(fd);
+            }
+            if(lock_fd >= 0){
+                release_lock(lock_fd, 0, 0);
+                close(lock_fd);
+            }
+            if(temp_path[0]){
+                unlink(temp_path);
+            }
+            if(result < 0 && !existed){
+                unlink(target->path);
+            }
+            return result;
+        }
+
+        if(close(fd) < 0){
+            result = -errno;
+            snprintf(error_msg, err_size, "Failed to close temporary file: %s", strerror(-result));
+            if(lock_fd >= 0){
+                release_lock(lock_fd, 0, 0);
+                close(lock_fd);
+            }
+            if(temp_path[0]){
+                unlink(temp_path);
+            }
+            if(result < 0 && !existed){
+                unlink(target->path);
+            }
+            return result;
+        }
+
+        fd = -1;
+
+        if(rename(temp_path, target->path) < 0){
+            result = -errno;
+            snprintf(error_msg, err_size, "Failed to rename temporary file to target path: %s", strerror(-result));
+            if(lock_fd >= 0){
+                release_lock(lock_fd, 0, 0);
+                close(lock_fd);
+            }
+            if(temp_path[0]){
+                unlink(temp_path);
+            }
+            if(result < 0 && !existed){
+                unlink(target->path);
+            }
+            return result;
+        }
+
+        temp_path[0] = '\0'; // clear temp_path as it has been renamed
+    }
+
+    if(fd >= 0 && fd != lock_fd){
+        close(fd);
+    }
+    if(lock_fd >= 0){
+        release_lock(lock_fd, 0, 0);
+        close(lock_fd);
+    }
+    if(temp_path[0]){
+        unlink(temp_path);
+    }
+    if(result < 0 && !existed){
+        unlink(target->path);
+    }
+    return result;
+}
+
+ssize_t send_file(int sockfd, const char *path, off_t offset, uint8_t data_code, uint8_t end_code, char *error_msg, size_t err_size){
+
+    int locked = 0;
+    ssize_t result = -EIO;
+    struct stat statbuf;
+
+    if(error_msg && err_size > 0){
+        error_msg[0] = '\0'; // clear error message buffer
+    }
+    if(offset < 0){
+        offset = 0; // default to 0 if negative
+    }
+
+    int fd = open(path, O_RDONLY);
+    if(fd < 0){
+        int saved = errno;
+        snprintf(error_msg, err_size, "Failed to open file for sending: %s", strerror(saved));
+
+        return -saved;
+    }
+
+    result = acquire_read_lock(fd, offset, 0);
+    if(result < 0){
+        int saved = -result;
+        snprintf(error_msg, err_size, "Failed to acquire read lock on file: %s", strerror(saved));
+        if(fd >= 0){
+            if(locked){
+                release_lock(fd, offset, 0);
+            }
+            close(fd);
+        }
+        return result;
+    }
+
+    locked = 1;
+
+    if(fstat(fd, &statbuf) < 0){
+        int saved = errno;
+        snprintf(error_msg, err_size, "Failed to get file info: %s", strerror(saved));
+        if(fd >= 0){
+            if(locked){
+                release_lock(fd, offset, 0);
+            }
+            close(fd);
+        }
+        return -saved;
+    }
+
+    // check if it's a regular file
+    if(!S_ISREG(statbuf.st_mode)){
+        snprintf(error_msg, err_size, "File is not a regular file");
+        if(fd >= 0){
+            if(locked){
+                release_lock(fd, offset, 0);
+            }
+            close(fd);
+        }
+
+        return -EISDIR; // not a regular file
+    }
+
+    // announced bytes = dimension - offset, 0 if offset goes beyond the end of the file
+    uint64_t size = (uint64_t)statbuf.st_size;
+    uint64_t to_send;
+
+    if((uint64_t)offset >= size){
+        to_send = 0;
+    } else {
+        to_send = size - (uint64_t)offset;
+    }
+
+    char size_str[32];
+    int n = snprintf(size_str, sizeof(size_str), "%llu", (unsigned long long)to_send);
+    send_ok(sockfd, size_str, n);
+
+    result = send_stream(sockfd, fd, offset, data_code, end_code);
+    if(result < 0){
+        int saved = -result;
+        snprintf(error_msg, err_size, "Failed to send file stream: %s", strerror(saved));
+        if(fd >= 0){
+            if(locked){
+                release_lock(fd, offset, 0);
+            }
+            close(fd);
+        }
+        return result;
+    }
+
+
+    if(fd >= 0){
+        if(locked){
+            release_lock(fd, offset, 0);
+        }
+        close(fd);
+    }
+
+    return result;
+
 }

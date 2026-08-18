@@ -8,6 +8,29 @@ Responsible for:
 #include"network.h"
 
 /*
+Constructs a socket endpoint from the given IP address and port number.
+*/
+int make_endpoint(const char *ip, const char *port, struct sockaddr_in *out){
+    memset(out, 0, sizeof(*out));
+    out->sin_family = AF_INET;
+    
+    int p = atoi(port);
+    if(p <= 0 || p > 65535){
+        fprintf(stderr, "Invalid port number: %s\n", port);
+        return -1;
+    }
+
+    out->sin_port = htons(p);
+
+    if(inet_aton(ip, &out->sin_addr) == 0){
+        fprintf(stderr, "Invalid IP address: %s\n", ip);
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
 send_data
 
 Function used to send data through the stream socket.
@@ -134,6 +157,13 @@ int recv_packet(int sockfd, char **buf, uint8_t *status, uint32_t *payload_len){
 
 int send_ok(int fd, const char *payload, uint32_t payload_len){
     return send_packet(fd, RSP_OK, payload, payload_len);
+}
+
+/*
+Used to send a simple OK response with a string message as payload.
+*/
+int send_ok_str(int fd, const char *msg){
+    return send_packet(fd, RSP_OK, msg, (uint32_t)strlen(msg));
 }
 
 int send_err(int fd, int err_code, const char *payload){ 

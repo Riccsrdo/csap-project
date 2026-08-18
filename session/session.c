@@ -11,6 +11,77 @@ Responsible for:
 #include <sys/types.h>
 #include <unistd.h>
 
+// unprivileged user and group IDs in Debian/Ubuntu, these values are not certain
+uid_t unpriv_uid = 65534; // 'nobody'
+gid_t unpriv_gid = 65534; // 'nogroup'
+
+// resolve values
+void setup_unprivileged_user(){
+    struct passwd *pwd = getpwnam("nobody");
+    struct group *grp = getgrnam("nogroup");
+    if(pwd){
+        unpriv_uid = pwd->pw_uid;
+    }
+    if(grp){
+        unpriv_gid = grp->gr_gid;
+    }
+}
+
+/*
+Function used to drop privileges of the process to the unprivileged user and group.
+*/
+int drop_privileges(){
+    if(geteuid() !=0) return 0;
+
+    if(setegid(unpriv_gid) < 0){
+        return -errno;
+    }
+
+    if(seteuid(unpriv_uid) < 0){
+        int saved= errno;
+        setegid(0); // try to restore group ID to root
+        return -saved;
+    }
+
+    return 0;
+}
+
+/*
+Function used to run an executable file with arguments, blocking SIGCHLD during the execution.
+*/
+static int run_exec(const char *file, char *const argv[]) {
+    // block standard server handler from running on SIGCHLD
+    sigset_t child_mask, old_mask;
+    sigemptyset(&child_mask);
+    sigaddset(&child_mask, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &child_mask, &old_mask); 
+
+    fflush(NULL);
+
+    pid_t pid = fork();
+    if(pid < 0) {
+        sigprocmask(SIG_SETMASK, &old_mask, NULL); // restore old mask
+        return -1;
+    }
+    if(pid == 0) { // child process
+        execvp(file, argv);
+        perror("execvp failed");
+        _exit(EXIT_FAILURE); // if execvp fails
+    }
+
+    int status = -1;
+    pid_t w = waitpid(pid, &status, 0);
+    sigprocmask(SIG_SETMASK, &old_mask, NULL); // restore
+
+    if(w!= pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return -1; // waitpid failed
+    }
+
+    return 0;
+
+}
+
+
 gid_t server_gid = 0;
 
 /*
@@ -101,281 +172,311 @@ int setup_server_gid(char *error_msg, uint32_t err_size) {
     }
 
     // create the group, using fork() and execlp to call groupadd
-    sigset_t chld_mask, old_mask;
-    sigemptyset(&chld_mask);
-    sigaddset(&chld_mask, SIGCHLD);
-    sigprocmask(SIG_BLOCK, &chld_mask, &old_mask); // block SIGCHLD signals to avoid the server's handler dealing with SIGCHLD for this forked process
-
-    fflush(NULL); // flush all stdio buffers before forking
-    pid_t pid = fork();
-    if(pid < 0) {
-        sigprocmask(SIG_SETMASK, &old_mask, NULL);
-        snprintf(error_msg, err_size - 1, "Failed to fork for group creation: %s", strerror(errno));
+    char *argv[] = { "groupadd", "csap_group", NULL};
+    if(run_exec("groupadd", argv) < 0){
+        snprintf(error_msg, err_size - 1, "Failed to create group: %s", strerror(errno));
+        seteuid(getuid());
         return -1;
-    } else if(pid == 0) { // child process
-        execlp("groupadd", "groupadd", "csap_group", NULL);
-        // if execlp returns, it means it failed
-        perror("execlp groupadd");
-        _exit(EXIT_FAILURE); // use _exit to avoid flushing stdio buffers again
-    } else { // parent process
-        int status = -1;
-        pid_t w = waitpid(pid, &status, 0);
-        sigprocmask(SIG_SETMASK, &old_mask, NULL); // reset previous mask
-        if(w == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-            // group created successfully, get the gid
-            grp = getgrnam("csap_group");
-            if(grp) {
-                server_gid = grp->gr_gid;
-                // set effective UID back to original user
-                seteuid(getuid());
-                return 0;
-            } else {
-                snprintf(error_msg, err_size - 1, "Failed to get group info after creation: %s", strerror(errno));
-                seteuid(getuid());
-                return -1;
-            }
-        }
-        else {
-            snprintf(error_msg, err_size - 1, "Failed to create group: %s", strerror(errno));
-            error_msg[err_size - 1] = '\0';
-            seteuid(getuid());
-            return -1;
-        }
     }
+
+    // validate correct creation
+    grp = getgrnam("csap_group");
+    if(!grp){
+        snprintf(error_msg, err_size - 1, "Failed to validate group creation");
+        seteuid(getuid());
+        return -1;
+    }
+    
+    // set the global variable server_gid
+    server_gid = grp->gr_gid;
+    seteuid(getuid());
+
+    return 0;
 
 }
 
-int handle_create_user(const char* username, mode_t perms, const char *root, char *err_msg, uint32_t err_size) {
+int handle_create_user(const char* username, mode_t perms, const char* root, char *err_msg, uint32_t err_size){
+    // first obtain the current effective UID to restore it later
+    uid_t original_euid = geteuid();
 
-    uid_t saved_uid = getuid();
+    int rc = -1;
 
+    // check if username is valid according to unix username rules
     if(validate_username(username, err_msg, err_size) < 0) {
         err_msg[err_size - 1] = '\0';
         return -1;
     }
 
-    if(perms > 0777) {
-        strncpy(err_msg, "Permissions must be between 0000 and 0777", err_size - 1);
+    // check the validity of provided permissions
+    if(perms > 0777){
+        snprintf(err_msg, err_size - 1, "Invalid permissions: must be between 0000 and 0777");
         err_msg[err_size - 1] = '\0';
         return -1;
     }
 
-    if(seteuid((uid_t)0)<0){
+    // set effective UID to root to create the user
+    if(seteuid(0) < 0) {
         snprintf(err_msg, err_size - 1, "Failed to set effective UID to root: %s", strerror(errno));
         err_msg[err_size - 1] = '\0';
         return -1;
     }
 
+    // obtain a pwd struct for the new user
     struct passwd *pwd = getpwnam(username);
-    if(pwd == NULL) {
-        // check if the server is running as root, if not return error
-        if(geteuid() != 0) {
-            strncpy(err_msg, "Server must be run as root to create users", err_size - 1);
+
+    if(pwd == NULL){ // new user
+        if(geteuid() !=0) {
+            strncpy(err_msg, "Insufficient privileges to create user", err_size - 1);
+            err_msg[err_size - 1] = '\0';
             errno = EPERM;
-            err_msg[err_size - 1] = '\0';
-            seteuid(saved_uid);
-            return -1;
-        }
 
-
-        sigset_t chld_mask, old_mask;
-        sigemptyset(&chld_mask); // empty the signal set
-        sigaddset(&chld_mask, SIGCHLD); // add SIGCHLD to the set
-        sigprocmask(SIG_BLOCK, &chld_mask, &old_mask); // block SIGCHLD signals to avoid the server's handler dealing with SIGCHLD for this forked process
-
-        fflush(NULL); // flush all stdio buffers before forking
-        pid_t pid = fork();
-        if(pid < 0) {
-            sigprocmask(SIG_SETMASK, &old_mask, NULL);
-            strncpy(err_msg, "Failed to fork for user creation", err_size - 1);
-            err_msg[err_size - 1] = '\0';
-            seteuid(saved_uid);
-            return -1;
-        } else if(pid == 0) { // child process
-            // set the group for the new user to the server's group
-            execlp("adduser", "adduser", "--disabled-password", "--gecos", "", "--ingroup", "csap_group",
-            "--no-create-home", username, NULL);
-            // if execlp returns, it means it failed
-            perror("execlp adduser");
-            _exit(EXIT_FAILURE); // use _exit to avoid flushing stdio buffers again
-        } else { // parent process
-            int status = -1;
-            pid_t w =waitpid(pid, &status, 0);
-            sigprocmask(SIG_SETMASK, &old_mask, NULL); // restore the old signal mask
-            if(w == pid &&WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                // user created successfully
-                // obtain uid
-                struct passwd *new_pwd = getpwnam(username);
-                if(!new_pwd) {
-                    strncpy(err_msg, "Failed to get new user info", err_size - 1);
-                    err_msg[err_size - 1] = '\0';
-                    seteuid(saved_uid);
-                    return -1;
-                }
-
-                int result = create_home_directory(root, username, err_msg, err_size, perms, new_pwd);
-                if(result < 0) {
-                    seteuid(saved_uid);
-                    return -1;
-                }
-
-                return 0;
-            }
-            else {
-                strncpy(err_msg, "Failed to create user", err_size - 1);
+            if(seteuid(original_euid) < 0) {
+                snprintf(err_msg, err_size - 1, "Failed to restore effective UID: %s", strerror(errno));
                 err_msg[err_size - 1] = '\0';
-                seteuid(saved_uid);
                 return -1;
             }
+
+            return rc;
         }
+
+        // handle user creation using fork() and execlp to call useradd
+        char *argv[] = { "adduser", "--disabled-password", "--gecos", "", "--ingroup", "csap_group", "--no-create-home", (char *)username, NULL};
+        if(run_exec("adduser", argv) < 0){
+            strncpy(err_msg, "Failed to create user", err_size - 1);
+            err_msg[err_size - 1] = '\0';
+
+            if(seteuid(original_euid) < 0) {
+                snprintf(err_msg, err_size - 1, "Failed to restore effective UID: %s", strerror(errno));
+                err_msg[err_size - 1] = '\0';
+                return -1;
+            }
+
+            return rc;
+        }
+
+        pwd = getpwnam(username); // verify that the user was created successfully
+        if(pwd == NULL) {
+            snprintf(err_msg, err_size - 1, "Failed to retrieve user info after creation");
+            err_msg[err_size - 1] = '\0';
+
+            if(seteuid(original_euid) < 0) {
+                snprintf(err_msg, err_size - 1, "Failed to restore effective UID: %s", strerror(errno));
+                err_msg[err_size - 1] = '\0';
+                return -1;
+            }
+
+            return rc;
+
+        }
+    } else if(!is_csap_user(pwd)) { // if the user already exists but is not a valid CSAP user, return an error
+        snprintf(err_msg, err_size - 1, "User exists but is not a valid CSAP user");
+        err_msg[err_size - 1] = '\0';
+
+        if(seteuid(original_euid) < 0) {
+            snprintf(err_msg, err_size - 1, "Failed to restore effective UID: %s", strerror(errno));
+            err_msg[err_size - 1] = '\0';
+            return -1;
+        }
+
+        return rc;
     }
 
-    // go back to saved uid
-    if(seteuid(saved_uid) < 0) {
-        snprintf(err_msg, err_size -1, "Failed to perform a drop of privileges: %s", strerror(errno));
-        return -1;
+    // create the home directory for the new user
+    if(create_home_directory(root, username, err_msg, err_size, perms, pwd) < 0) {
+        if(seteuid(original_euid) < 0) {
+            snprintf(err_msg, err_size - 1, "Failed to restore effective UID: %s", strerror(errno));
+            err_msg[err_size - 1] = '\0';
+            return -1;
+        }
+        return rc;
     }
 
-    if(!is_csap_user(pwd)) {
-        strncpy(err_msg, "User is not a valid CSAP user", err_size - 1);
+    rc = 0; // user created successfully
+
+    // restore the original effective UID
+    if(seteuid(original_euid) < 0) {
+        snprintf(err_msg, err_size - 1, "Failed to restore effective UID: %s", strerror(errno));
         err_msg[err_size - 1] = '\0';
         return -1;
+
     }
 
-    // create folder for the user in the root directory, with the specified permissions
+    return rc;
 
-    int result = create_home_directory(root, username, err_msg, err_size, perms, pwd);
-    if(result < 0) {
-        return -1;
+}
+
+/*
+Function used to build the fifo path for a specific user, given their PID and the root directory.
+*/
+void session_fifo_path(char *out_path, size_t out_size, const char *root, pid_t pid) {
+    snprintf(out_path, out_size, "%s/.sessions/fifo_%d", root, pid);
+}
+
+/*
+Writes a formatted message in the fifo, using 
+the provided format and variable arguments.
+*/
+int notify_pid(const char *root, pid_t pid, const char *format, ...) {
+    char fifo_path[PATH_MAX + 64];
+    session_fifo_path(fifo_path, sizeof(fifo_path), root, pid); // construct fifo path
+
+    // open fifo in O_NONBLOCK mode to avoid blocking if the reader is not ready
+    int fd = open(fifo_path, O_WRONLY | O_NONBLOCK);
+    if(fd < 0) {
+        return -errno;
     }
-    return 0;
 
+    char msg[PATH_MAX + 128];
+    va_list args; // initialize variable argument list
+    va_start(args, format);
+    int n = vsnprintf(msg, sizeof(msg), format, args); // format the message
+    va_end(args);
+
+    if(n<0){
+        close(fd);
+        return -EIO;
+    }
+
+    int r = write_all(fd, msg, n); // write the message to the fifo
+    close(fd);
+
+    return r;
 }
 
 int handle_login(session_t *session, char *username, char *err_msg, uint32_t err_size) {
 
-    // check if the user exists in the system
+    int n_fd = -1;
+    int rc = -1;
+    char fifo_name[PATH_MAX + 64];
+    fifo_name[0] = '\0';
+
+    // first check if the user already exists in the system
     struct passwd *pwd = getpwnam(username);
-    if(pwd == NULL) {
-        strncpy(err_msg, "User does not exist", err_size - 1);
-        err_msg[err_size - 1] = '\0';
+    if(pwd == NULL){
+        snprintf(err_msg, err_size - 1, "User does not exist");
         return -1;
     }
 
+    // if it exists, check its a valid csap_user
     if(!is_csap_user(pwd)) {
-        strncpy(err_msg, "User is not a valid CSAP user", err_size - 1);
-        err_msg[err_size - 1] = '\0';
+        snprintf(err_msg, err_size - 1, "User exists but is not a valid CSAP user");
         return -1;
     }
 
-    // verify if the user's home directory exists in the root directory
+    // check if the user's home directory exists in the root directory
     char home_dir[PATH_MAX + 64];
     snprintf(home_dir, sizeof(home_dir), "%s/%.32s", session->root_path, username);
 
-    // perform canonicalization of the home_dir path to ensure it is within the root directory
+    // canonicalize the home_dir path to avoid issues with symlinks or relative paths
     char resolved_home[PATH_MAX];
     if(validate_path(home_dir, session->root_path, resolved_home) < 0) {
-        strncpy(err_msg, "User's home directory is outside of the root directory", err_size - 1);
-        err_msg[err_size - 1] = '\0';
+        snprintf(err_msg, err_size - 1, "User's home directory is invalid or does not exist");
         return -1;
     }
 
     struct stat st;
     if(stat(resolved_home, &st) < 0 || !S_ISDIR(st.st_mode)) {
-        strncpy(err_msg, "User's home directory does not exist", err_size - 1);
-        err_msg[err_size - 1] = '\0';
+        snprintf(err_msg, err_size - 1, "User's home directory does not exist");
         return -1;
     }
 
+    // elevate privileges to create fifo in the .sessions directory
+    if(seteuid(0) < 0) {
+        snprintf(err_msg, err_size - 1, "Failed to set effective UID to root: %s", strerror(errno));
+        return -1;
+    }
 
-    char fifo_name[PATH_MAX + 64];
-    snprintf(fifo_name, sizeof(fifo_name), "%s/.sessions/fifo_%d", session->root_path, getpid());
+    session_fifo_path(fifo_name, sizeof(fifo_name), session->root_path, getpid());
 
-    // Unlink the fifo if it already exists
+    // unlink fifo if it already exists
     unlink(fifo_name);
 
-    if(mkfifo(fifo_name, 0660) <0){ // 0660 to allow group members to read/write
-        strncpy(err_msg, "Failed to create FIFO for notifications", err_size - 1);
-        err_msg[err_size - 1] = '\0';
-        perror("mkfifo");
-        return -1;
+
+    // create the fifo for notifications
+    if(mkfifo(fifo_name, 0660) < 0) {
+        snprintf(err_msg, err_size - 1, "Failed to create fifo: %s", strerror(errno));
+        
+        if(n_fd >= 0) close(n_fd);
+        if(fifo_name[0]) unlink(fifo_name);
+        session->notify_fd = -1;
+        session->logged_in = 0;
+        if(geteuid() == 0) drop_privileges();
+        return rc;
     }
 
-    int n_fd = 0;
-
-    // open fifo for reading and writing, I avoid in this way blocking behaviour and EOF
-    if((n_fd = open(fifo_name, O_RDWR)) < 0){
-        perror("open fifo");
-        strncpy(err_msg, "Failed to open FIFO for notifications", err_size - 1);
-        err_msg[err_size - 1] = '\0';
+    // open the fifo for reading and writing to avoid blocks and EOF
+    if((n_fd = open(fifo_name, O_RDWR | O_NONBLOCK)) < 0) {
+        snprintf(err_msg, err_size - 1, "Failed to open fifo: %s", strerror(errno));
         unlink(fifo_name);
-        return -1;
+        session->notify_fd = -1;
+        session->logged_in = 0;
+        if(geteuid() == 0) drop_privileges();
+        return rc;
     }
 
-    // set cwd of the user to their home directory
+    // set ownership of .sessions dir to root:csap_group
+    char session_dir[PATH_MAX + 64];
+    snprintf(session_dir, sizeof(session_dir), "%s/.sessions", session->root_path);
+    if(chown(session_dir, 0, server_gid) < 0) {
+        snprintf(err_msg, err_size - 1, "Failed to set ownership of .sessions directory: %s", strerror(errno));
+        close(n_fd);
+        unlink(fifo_name);
+        session->notify_fd = -1;
+        session->logged_in = 0;
+        if(geteuid() == 0) drop_privileges();
+        return rc;
+    }
+
+    // set ownership of the named fifo to user
+    if(chown(fifo_name, pwd->pw_uid, server_gid) < 0) {
+        snprintf(err_msg, err_size - 1, "Failed to set ownership of fifo: %s", strerror(errno));
+        close(n_fd);
+        unlink(fifo_name);
+        session->notify_fd = -1;
+        session->logged_in = 0;
+        if(geteuid() == 0) drop_privileges();
+        return rc;
+    }
+
+    // set CWD to the user's home directory
     if(chdir(resolved_home) < 0) {
         snprintf(err_msg, err_size - 1, "Failed to change directory to user's home: %s", strerror(errno));
-        err_msg[err_size - 1] = '\0';
         close(n_fd);
         unlink(fifo_name);
         session->notify_fd = -1;
         session->logged_in = 0;
-        return -1;
+        if(geteuid() == 0) drop_privileges();
+        return rc;
     }
 
-    session->notify_fd = n_fd; // save the notify fd in the session struct
-    // populate the session struct with the user's information
-    session->uid = pwd->pw_uid;
-    strncpy(session->user, username, sizeof(session->user) - 1);
-    session->user[sizeof(session->user) - 1] = '\0';
-    snprintf(session->home_path, sizeof(session->home_path), "%s", resolved_home);
-    session->home_path[sizeof(session->home_path) - 1] = '\0';
-
-    // set ownership of the .sessions dir to "root:csap_group"
-    char sessions_dir[PATH_MAX + 64];
-    snprintf(sessions_dir, sizeof(sessions_dir), "%s/.sessions", session->root_path);
-    if(chown(sessions_dir, 0, server_gid) < 0) {
-        snprintf(err_msg, err_size - 1, "Failed to set ownership of .sessions directory: %s", strerror(errno));
-        err_msg[err_size - 1] = '\0';
-        close(n_fd);
-        unlink(fifo_name);
-        session->notify_fd = -1;
-        session->logged_in = 0;
-        return -1;
-    }
-
-    // set ownership of the fifo to user:csap_group
-    if(chown(fifo_name, session->uid, server_gid) < 0){
-        snprintf(err_msg, err_size - 1, "Failed to set ownership of FIFO: %s", strerror(errno));
-        err_msg[err_size - 1] = '\0';
-        close(n_fd);
-        unlink(fifo_name);
-        session->notify_fd = -1;
-        session->logged_in = 0;
-        return -1;
-    }
-
-    if(setegid(server_gid) < 0) {
+    // set effective UID to the user's UID and group ID to the server's group ID
+    if(setegid(server_gid) <0){
         snprintf(err_msg, err_size - 1, "Failed to set effective GID: %s", strerror(errno));
-        err_msg[err_size - 1] = '\0';
         close(n_fd);
         unlink(fifo_name);
         session->notify_fd = -1;
         session->logged_in = 0;
-        return -1;
+        if(geteuid() == 0) drop_privileges();
+        return rc;
     }
-    if(seteuid(session->uid) < 0) {
+
+    if(seteuid(pwd->pw_uid) < 0) {
         snprintf(err_msg, err_size - 1, "Failed to set effective UID: %s", strerror(errno));
-        err_msg[err_size - 1] = '\0';
         close(n_fd);
         unlink(fifo_name);
         session->notify_fd = -1;
         session->logged_in = 0;
-        return -1;
+        if(geteuid() == 0) drop_privileges();
+        return rc;
     }
 
+    // build session struct
+    session->notify_fd = n_fd;
     session->logged_in = 1;
-
+    session->uid = pwd->pw_uid;
+    snprintf(session->user, sizeof(session->user), "%s", username);
+    snprintf(session->home_path, sizeof(session->home_path), "%s", resolved_home);
 
     return 0;
+
 }

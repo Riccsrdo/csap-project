@@ -14,6 +14,8 @@
 #include<grp.h>
 #include<sys/wait.h>
 #include"../paths/paths.h"
+#include<stdarg.h>
+
 
 int setup_server_gid(char *error_msg, uint32_t err_size);
 
@@ -25,5 +27,9 @@ int create_home_directory(const char *root, const char *username, char *err_msg,
 int handle_login(session_t *session, char *username, char *err_msg, uint32_t err_size);
 
 int handle_create_user(const char* username, mode_t perms, const char *root, char *err_msg, uint32_t err_size);
+
+int notify_pid(const char *root, pid_t pid, const char *format, ...);
+
+void session_fifo_path(char *out_path, size_t out_size, const char *root, pid_t pid);
 
 #endif

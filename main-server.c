@@ -75,29 +75,10 @@ static void collect_stale_sessions(){
         return;
     }
 
-    int r = sem_lock(sem_id);
-    if(r<0){
-        fprintf(stderr, "Failed to lock semaphore for session cleanup: %s\n", strerror(-r));
-        sessions_cleanup = 1; // set the flag to indicate that we need to clean up sessions
-        return;
-    }
-
-    session_table_t *table = &shared_memory->session_table;
-    for(int i = 0; i < table->count; i++) {
-        if(!table->entries[i].in_use) {
-            continue; // skip entries currenly being used
-        }
-        if(kill(table->entries[i].pid, 0) == -1 && errno == ESRCH) {
-            // process does not exist, mark the session as not in use
-            table->entries[i].in_use = 0;
-            memset(&table->entries[i], 0, sizeof(session_entry_t)); // clear the entry
-            table->entries[i].pid = -1; 
-        }
-    }
-
-    r = sem_unlock(sem_id);
-    if(r < 0){
-        fprintf(stderr, "Failed to unlock semaphore for session cleanup: %s\n", strerror(-r));
+    int r = shm_sessions_collect_stale(shared_memory, sem_id);
+    if(r < 0) {
+        fprintf(stderr, "Error collecting stale sessions: %s\n", strerror(-r));
+        sessions_cleanup = 1; // set the flag to indicate that we need to clean up sessions again
     }
 }
 
@@ -135,19 +116,8 @@ int start_server(char *ip_address, char *port_number){
     }
 
     struct sockaddr_in server_address;
-    memset(&server_address, 0, sizeof(server_address));
-
-
-    server_address.sin_family = AF_INET;
-    int port = atoi(port_number); // convert port number from string to integer
-    if(port <= 0 || port > 65535) {
-        fprintf(stderr, "Invalid port number: %s\n", port_number);
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
-    server_address.sin_port = htons(port);
-    if(inet_aton(ip_address, &server_address.sin_addr) == 0) {
-        fprintf(stderr, "Invalid IP address: %s\n", ip_address);
+    // construct socket endpoint
+    if(make_endpoint(ip_address, port_number, &server_address) < 0){
         close(sockfd);
         exit(EXIT_FAILURE);
     }
@@ -159,7 +129,8 @@ int start_server(char *ip_address, char *port_number){
         exit(EXIT_FAILURE);
     }
 
-    printf("[SETUP]: Socket bound to %s:%d\n", ip_address, port);
+    
+    printf("[SETUP]: Socket bound to %s:%s\n", ip_address, port_number);
 
     // listen for incoming connections
     if(listen(sockfd, 10) < 0) {
@@ -205,6 +176,48 @@ static const char *path_error_reason(int err) {
 }
 
 
+/*
+Parse cmd from payload into cmd_t structure.
+*/
+static int cmd_parse(int fd, const void *payload, cmd_t *out){
+    char error_msg[256];
+    error_msg[0] = '\0'; 
+
+    if(parse_command(payload, out, error_msg, sizeof(error_msg)) < 0) {
+        send_err(fd, EINVAL, error_msg);
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+Validate path with provided root directory, and return the resolved path in out.
+*/
+static int cmd_resolve(int fd, const char* path, const char *root, char *out){
+    int r = validate_path(path, root, out);
+    if(r < 0) {
+        send_err(fd, -r, path_error_reason(-r));
+        return -1;
+    }
+    return 0;
+}
+
+/*
+Validate permissions string and convert it to mode_t.
+*/
+static int cmd_perms(int fd, const char *arg, mode_t *out){
+    long perms = 0;
+    int r = validate_permissions(&perms, (char*) arg);
+    if(r < 0) {
+        send_err(fd, EINVAL, "Invalid permissions format");
+        return -1;
+    }
+    *out = (mode_t)perms;
+    return 0;
+}
+
+
 void dispatch(session_t *session, int clientSocket, uint8_t command, void *payload, uint32_t payload_len) {
     (void)payload_len; // suppress warning
     
@@ -217,10 +230,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         
         // parse payload to extract username
         cmd_t login_command;
-        login_command.code = CMD_LOGIN;
-        if(parse_command(payload, &login_command, error_msg, err_size) < 0) {
-            send_err(clientSocket, EINVAL, error_msg);
-            return;
+        if(cmd_parse(clientSocket, payload, &login_command) < 0) {
+            return; // error message already sent to client
         }
 
         // if user has already logged in, send error response to client
@@ -249,90 +260,27 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             int n = snprintf(msg, sizeof(msg), "Logged in as %s", session->user);
             send_ok(clientSocket, msg, n);
 
-            // fill sessions table with the new session information
-            session_entry_t entry = {0};
-            entry.pid = getpid();
-            entry.in_use = 1;
-            strncpy(entry.username, session->user, sizeof(entry.username) - 1);
-            entry.username[sizeof(entry.username) - 1] = '\0';
+            // add the session to the shared memory
+            int r = shm_session_add(shared_memory, sem_id, session->user, getpid());
+            if(r < 0) {
+                fprintf(stderr, "Failed to add session to shared memory: %s\n", strerror(-r));
+            }
+
+            // check requests arrived while user was offline, and notify the user if any
+            transfer_request_entry_t requests[MAX_ENTRIES];
+            int num_requests = shm_requests_for_dest(shared_memory, sem_id, session->user, requests, MAX_ENTRIES);
             
-            int r = sem_lock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to lock semaphore");
-                return;
-            }
-            // look for first entry having in_use == 0, if found use it, else use the next available entry
-            int found = 0;
-            for(int i = 0; i < shared_memory->session_table.count; i++) {
-                if(shared_memory->session_table.entries[i].in_use == 0) {
-                    shared_memory->session_table.entries[i] = entry;
-                    found = 1;
-                    break;
+            for(int i = 0; i < num_requests; i++) {
+                char base_name[NAME_MAX + 1];
+                path_basename(base_name, sizeof(base_name), requests[i].file_path_absolute);
+
+                int r = notify_pid(session->root_path, getpid(), "REQ|%d|%s\n", requests[i].id, base_name);
+
+                if(r < 0) {
+                    fprintf(stderr, "Failed to notify user %s: %s\n", session->user, strerror(-r));
                 }
             }
-            if(!found) {
-                if(shared_memory->session_table.count >= MAX_ENTRIES) {
-                    r = sem_unlock(sem_id);
-                    if(r < 0) {
-                        send_err(clientSocket, -r, "Failed to unlock semaphore");
-                    }
-                    send_err(clientSocket, ENOMEM, "Session table is full");
-                    return;
-                }
-                shared_memory->session_table.entries[shared_memory->session_table.count++] = entry;
-            }
-            r = sem_unlock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to unlock semaphore");
-                return;
-            }
-
-            // look for pending requests for this user and notify them
-            r = sem_lock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to lock semaphore");
-                return;
-            }
-
-            for(int i = 0; i < shared_memory->pending_requests_table.count; i++) {
-                transfer_request_entry_t *request = &shared_memory->pending_requests_table.entries[i];
-                if(strcmp(request->dest_username, session->user) == 0 && request->status == PENDING) {
-                    // notify the user about the pending request through the FIFO
-                    char fifo_path[PATH_MAX + 64];
-                    snprintf(fifo_path, sizeof(fifo_path), "%s/.sessions/fifo_%d", session->root_path, getpid());
-                    int fifo_fd = open(fifo_path, O_WRONLY | O_NONBLOCK);
-                    if(fifo_fd < 0) {
-                        fprintf(stderr, "Failed to open FIFO for user %s: %s\n", session->user, strerror(errno));
-                        continue;
-                    }
-                    
-                    // extract the basename of the source file
-                    char src_path_copy[PATH_MAX];
-                    strncpy(src_path_copy, request->file_path_absolute, sizeof(src_path_copy) - 1);
-                    src_path_copy[sizeof(src_path_copy) - 1] = '\0';
-                    char *base_name = basename(src_path_copy);
-
-                    // notify through FIFO the dest user about the pending request, sending the request ID and the basename of the file
-                    char request_msg[PATH_MAX + 64];
-                    snprintf(request_msg, sizeof(request_msg), "REQ|%d|%s\n", request->id, base_name);
-                    ssize_t bytes_written = write(fifo_fd, request_msg, strlen(request_msg));
-
-                    if(bytes_written < 0) {
-                        fprintf(stderr, "Failed to write to FIFO for user %s: %s\n", session->user, strerror(errno));
-                    }
-
-                    close(fifo_fd);
-                }
-            }
-
-            r = sem_unlock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to unlock semaphore");
-                return;
-            }
-
         }
-
 
         #if DEBUG
         printf("[DEBUG]: User %s logged in with UID %d\n", session->user, session->uid);
@@ -343,9 +291,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
     if(command == CMD_CREATE_USER) {
     
         cmd_t cu_command;
-        if(parse_command(payload, &cu_command, error_msg, err_size) < 0) {
-            send_err(clientSocket, EINVAL, error_msg);
-            return;
+        if(cmd_parse(clientSocket, payload, &cu_command) < 0) {
+            return; 
         }
 
         if(cu_command.argc < 2) {
@@ -354,12 +301,9 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             return;
         }
 
-        long perms = 0;
-        int r = validate_permissions(&perms, cu_command.buf2);
-        if(r < 0) {
-            const char *reason = "Invalid permissions format";
-            send_err(clientSocket, EINVAL, reason);
-            return;
+        mode_t perms;
+        if(cmd_perms(clientSocket, cu_command.buf2, &perms) < 0) {
+            return; 
         }
 
         uint32_t err_size = sizeof(error_msg);
@@ -393,12 +337,9 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
     switch(command){
         case(CMD_ACCEPT):{
 
-            int request_failure = 0;
-
             cmd_t accept_command;
-            if(parse_command(payload, &accept_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
-                return;
+            if(cmd_parse(clientSocket, payload, &accept_command) < 0) {
+                return; 
             }
 
             // accept <directory> <request_id>
@@ -409,197 +350,79 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
 
-            // check if we're the destination user for this request, if not send error (otherwise, the user could accept requests not meant for them)
-            int r = sem_lock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to lock semaphore");
-                return;
-            }
-            
-            int found = 0;
-            // copy locally the entry of shmem
-            transfer_request_entry_t request_copy;
-            int request_index = -1;
-            memset(&request_copy, 0, sizeof(request_copy));
-            for(int i = 0; i< shared_memory->pending_requests_table.count; i++){
-                // found request, copy it and mark it as found
-                if(shared_memory->pending_requests_table.entries[i].id == request_id) {
-                    if(strcmp(shared_memory->pending_requests_table.entries[i].dest_username, session->user) != 0) {
-                        r = sem_unlock(sem_id);
-                        if(r < 0) {
-                            send_err(clientSocket, -r, "Failed to unlock semaphore");
-                        }
-                        const char *reason = "You are not the destination user for this request";
-                        send_err(clientSocket, EACCES, reason);
-                        return;
-                    }
-                    request_copy = shared_memory->pending_requests_table.entries[i];
-                    request_index = i;
-                    found = 1;
-                    break;
-                }
-            }
-
-            r = sem_unlock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to unlock semaphore");
-                return;
-            }
-            if(!found) {
-                const char *reason = "Request ID not found";
-                send_err(clientSocket, ENOENT, reason);
-                return;
-            }
-
-            // validate the directory path against the user's home directory
+            // validate dest path against home_path, if not valid return error
             char full_dest_path[PATH_MAX];
-            r = validate_path(accept_command.buf, session->home_path, full_dest_path);
+            if(cmd_resolve(clientSocket, accept_command.buf, session->home_path, full_dest_path) < 0) {
+                return;
+            }
+
+            transfer_request_entry_t request_copy;
+            // accept the request, changing its status to ACCEPTED and retrieving the request information
+            int r = shm_request_take(shared_memory, sem_id, request_id, session->user, ACCEPTED, &request_copy);
             if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+                send_err(clientSocket, -r, "Failed to accept request");
                 return;
             }
 
-
-            // update the request status to ACCEPTED
-            r = sem_lock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to lock semaphore");
-                return;
-            }
-            //  check if req is still valid, looking if it has not been accepted or rejected by another process in the meantime
-            if(request_index < 0 ||
-               shared_memory->pending_requests_table.entries[request_index].id != request_copy.id ||
-               shared_memory->pending_requests_table.entries[request_index].status != PENDING) {
-                sem_unlock(sem_id);
-                send_err(clientSocket, ENOENT, "Request no longer available");
-                return;
-            }
-            shared_memory->pending_requests_table.entries[request_index].status = ACCEPTED;
-
-            r = sem_unlock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to unlock semaphore");
-                return;
-            }
-
-            // notify the source user process about the acceptance of the request through the FIFO
-            // look up for the source user in session table to get the PID
-            int source_user_found = 0;
+            // obtain source user PID and online status to notify them
+            pid_t source_user_pid = -1;
             int source_user_online = 0;
-            int source_user_pid = -1;
-            r = sem_lock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to lock semaphore");
-                return;
-            }
-            for(int i = 0; i < shared_memory->session_table.count; i++) {
-                if(strcmp(shared_memory->session_table.entries[i].username, request_copy.source_username) == 0) { 
-                    source_user_found = 1;
-                    source_user_pid = shared_memory->session_table.entries[i].pid;
-                    if(shared_memory->session_table.entries[i].in_use == 1) {
-                        source_user_online = 1;
-                    }
-                break;
-                }
-            }
+            int found = shm_session_find(shared_memory, sem_id, request_copy.source_username, &source_user_pid, &source_user_online);
 
-            r = sem_unlock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to unlock semaphore");
+            if(found < 0) {
+                send_err(clientSocket, -found, "Failed to look up source user");
                 return;
             }
 
-            if(!source_user_found) {
-                const char *reason = "Source user not found";
-                send_err(clientSocket, ENOENT, reason);
+            if(found == 0){
+                send_err(clientSocket, ENOENT, "Source user not found");
                 return;
             }
 
-            // extract the basename of the source file
-            char src_path_copy[PATH_MAX];
-            strncpy(src_path_copy, request_copy.file_path_absolute, sizeof(src_path_copy) - 1);
-            src_path_copy[sizeof(src_path_copy) - 1] = '\0';
-            char *base_name = basename(src_path_copy);
+            char base_name[NAME_MAX + 1];
+            path_basename(base_name, sizeof(base_name), request_copy.file_path_absolute);
 
-            // construct full dest path adding the basename of the source file to the destination directory
-            char full_dest_file_path[PATH_MAX + NAME_MAX + 2]; // +2 for '/' and '\0', NAME_MAX is the maximum length of a filename component
-            snprintf(full_dest_file_path, sizeof(full_dest_file_path), "%s/%.*s", full_dest_path, NAME_MAX, base_name);
+            // final path of copying given by <dir> plus file name
+            char full_dest_file_path[PATH_MAX];
+            snprintf(full_dest_file_path, sizeof(full_dest_file_path), "%s/%s", full_dest_path, base_name);
 
-            // copy the file from source to destination
             int copy_result = execute_transfer_copy(request_copy.file_path_absolute, full_dest_file_path);
             if(copy_result < 0) {
-                request_failure = 1;
-            }
-            
-            // if request has failed, update the request status to FAILED
-            if(request_failure) {
-                r = sem_lock(sem_id);
-                if(r < 0) {
-                    send_err(clientSocket, -r, "Failed to lock semaphore");
-                    return;
-                }
-                if(request_index >= 0 &&
-                   shared_memory->pending_requests_table.entries[request_index].id == request_copy.id) {
-                    shared_memory->pending_requests_table.entries[request_index].status = FAILED;
-                }
-                r = sem_unlock(sem_id);
-                if(r < 0) {
-                    send_err(clientSocket, -r, "Failed to unlock semaphore");
-                    return;
-                }
+                shm_request_set(shared_memory, sem_id, request_id, FAILED); // set the request status to FAILED
             }
 
-            // if source user is online, notify them about the acceptance or failure of the request through the FIFO
+            // unlock sender
             if(source_user_online){
-                // construct FIFO path based on the source_user PID
-                char fifo_path[PATH_MAX + 64];
-                snprintf(fifo_path, sizeof(fifo_path), "%s/.sessions/fifo_%d", session->root_path, source_user_pid);
-
-                int fifo_fd = open(fifo_path, O_WRONLY | O_NONBLOCK);
-                if(fifo_fd < 0) {
-                    const char *reason = "Failed to open FIFO for source user";
-                    send_err(clientSocket, errno, reason);
-                    return;
-                }
-
-                // depending on the result of the copy operation, send either ACCEPT or FAIL message to the source user process through the FIFO
-                char request_status_str[PATH_MAX + 64];
-                if(request_failure) {
-                    snprintf(request_status_str, sizeof(request_status_str), "FAIL|%d|%d\n", request_copy.id, -copy_result);
+                int r;
+                if(copy_result < 0) {
+                    r = notify_pid(session->root_path, source_user_pid, "FAIL|%d|%d\n",
+                                    request_copy.id, -copy_result);
                 } else {
-                    snprintf(request_status_str, sizeof(request_status_str), "ACCEPT|%d|%s\n", request_copy.id, request_copy.file_path_absolute);
+                    r = notify_pid(session->root_path, source_user_pid, "ACCEPT|%d|%s\n",
+                                    request_copy.id, full_dest_file_path);
                 }
 
-                ssize_t bytes_written = write(fifo_fd, request_status_str, strlen(request_status_str));
-                if(bytes_written < 0) {
-                    const char *reason = "Failed to write to FIFO for source user";
-                    send_err(clientSocket, errno, reason);
-                    close(fifo_fd);
+                if(r < 0){
+                    send_err(clientSocket, -r, "Failed to notify source user about acceptance");
                     return;
                 }
-
-                close(fifo_fd);
             }
 
-            // send error message only after unlocking the destination user through the FIFO
-            if(request_failure){
-                const char *reason = "File transfer failed";
-                send_err(clientSocket, -copy_result, reason);
+            if(copy_result < 0) {
+                send_err(clientSocket, -copy_result, "Failed to copy file");
                 return;
             }
 
-            char msg[128 + PATH_MAX];
-            snprintf(msg, sizeof(msg), "Transfer request accepted and file copied to %s", base_name);
-            send_ok(clientSocket, msg, strlen(msg));
-
+            char msg[128 + NAME_MAX];
+            snprintf(msg, sizeof(msg), "Transfer request accepted successfully, file copied to %s", full_dest_file_path);
+            send_ok_str(clientSocket, msg);
 
             break;
         }
         case(CMD_REJECT):{
             cmd_t reject_command;
-            if(parse_command(payload, &reject_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
-                return;
+            if(cmd_parse(clientSocket, payload, &reject_command) < 0) {
+                return; 
             }
 
             // reject <request_id>
@@ -611,149 +434,50 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
 
-            // check if we're the destination user for this request, if not send error (otherwise, the user could reject requests not meant for them)
-            int r = sem_lock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to lock semaphore");
-                return;
-            }
-            int found = 0;
-            // copy locally the entry of the request to avoid holding the semaphore while notifying the source user
             transfer_request_entry_t request_copy;
-            int request_index = -1;
-            memset(&request_copy, 0, sizeof(request_copy));
-
-            for(int i = 0; i< shared_memory->pending_requests_table.count; i++){
-                // if it's the request we're looking for, copy it and mark it as found
-                if(shared_memory->pending_requests_table.entries[i].id == request_id) {
-                    if(strcmp(shared_memory->pending_requests_table.entries[i].dest_username, session->user) != 0) {
-                        r = sem_unlock(sem_id);
-                        if(r < 0) {
-                            send_err(clientSocket, -r, "Failed to unlock semaphore");
-                        }
-                        const char *reason = "You are not the destination user for this request";
-                        send_err(clientSocket, EACCES, reason);
-                        return;
-                    }
-                    request_copy = shared_memory->pending_requests_table.entries[i];
-                    request_index = i;
-                    found = 1;
-                    break;
-                }
-            }
-
-            r = sem_unlock(sem_id);
+            int r= shm_request_take(shared_memory, sem_id, request_id, session->user, REJECTED, &request_copy);
             if(r < 0) {
-                send_err(clientSocket, -r, "Failed to unlock semaphore");
-                return;
-            } 
-
-            if(!found) {
-                const char *reason = "Request ID not found";
-                send_err(clientSocket, ENOENT, reason);
+                send_err(clientSocket, -r, "Failed to reject request");
                 return;
             }
 
-            // update the request status to REJECTED
-            r = sem_lock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to lock semaphore");
-                return;
-            }
-
-            // check if the request is still valid, for example if it has not been accepted or rejected by another process in the meantime
-            if(request_index < 0 ||
-               shared_memory->pending_requests_table.entries[request_index].id != request_copy.id ||
-               shared_memory->pending_requests_table.entries[request_index].status != PENDING) {
-                sem_unlock(sem_id);
-                send_err(clientSocket, ENOENT, "Request no longer available");
-                return;
-            }
-            shared_memory->pending_requests_table.entries[request_index].status = REJECTED;
-
-            r = sem_unlock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to unlock semaphore");
-                return;
-            }
-
-            // notify the source user process about the rejection of the request through the FIFO
             // look up for the source user in session table to get the PID
-            int source_user_found = 0;
+            pid_t source_user_pid = -1;
             int source_user_online = 0;
-            int source_user_pid = -1;
-            r = sem_lock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to lock semaphore");
-                return;
-            }
-            for(int i = 0; i < shared_memory->session_table.count; i++) {
-                if(strcmp(shared_memory->session_table.entries[i].username, request_copy.source_username) == 0) {
-                    source_user_found = 1;
-                    source_user_pid = shared_memory->session_table.entries[i].pid;
-                    if(shared_memory->session_table.entries[i].in_use == 1) {
-                        source_user_online = 1;
-                    }
+            int found = shm_session_find(shared_memory, sem_id, request_copy.source_username, &source_user_pid, &source_user_online);
 
-                    break;
-                }
-            }
-            r = sem_unlock(sem_id);
-            if(r < 0) {
-                send_err(clientSocket, -r, "Failed to unlock semaphore");
+            if(found < 0) {
+                send_err(clientSocket, -found, "Failed to look up source user");
                 return;
             }
 
-            if(!source_user_found) {
-                const char *reason = "Source user not found";
-                send_err(clientSocket, ENOENT, reason);
+            if(found == 0){
+                send_err(clientSocket, ENOENT, "Source user not found");
                 return;
             }
 
-            if(source_user_online) {
-                // construct FIFO path based on the source_user PID
-                char fifo_path[PATH_MAX + 64];
-                snprintf(fifo_path, sizeof(fifo_path), "%s/.sessions/fifo_%d", session->root_path, source_user_pid);
-                // open the FIFO for writing
-                int fifo_fd = open(fifo_path, O_WRONLY | O_NONBLOCK);
-                if(fifo_fd < 0) {
-                    const char *reason = "Failed to open FIFO for source user";
-                    send_err(clientSocket, errno, reason);
+            if(source_user_online){
+                r = notify_pid(session->root_path, source_user_pid, "REJECT|%d\n", request_copy.id);
+                if(r < 0){
+                    send_err(clientSocket, -r, "Failed to notify source user about rejection");
                     return;
                 }
-
-                // send the transfer request ID and the file path to the source user process through the FIFO
-                char request_id_str[PATH_MAX + 64];
-                snprintf(request_id_str, sizeof(request_id_str), "REJECT|%d\n", request_copy.id);
-                ssize_t bytes_written = write(fifo_fd, request_id_str, strlen(request_id_str));
-                if(bytes_written < 0) {
-                    const char *reason = "Failed to write to FIFO for source user";
-                    send_err(clientSocket, errno, reason);
-                    close(fifo_fd);
-                    return;
-                }
-                close(fifo_fd);
             }
 
-            // notify the client
-            char *msg = "Transfer request rejected successfully";
-            send_ok(clientSocket, msg, strlen(msg));
+            send_ok_str(clientSocket, "Transfer request rejected successfully");
 
             break;
         }
         case(CMD_TRANSFER_REQ):{
             cmd_t transfer_command;
-            if(parse_command(payload, &transfer_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
-                return;
+            if(cmd_parse(clientSocket, payload, &transfer_command) < 0) {
+                return; 
             }
 
             // transfer_request <file> <dest_user>
             // validate source path against home_path, if not valid return error
             char full_src_path[PATH_MAX];
-            int r = validate_path(transfer_command.buf, session->home_path, full_src_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, transfer_command.buf, session->home_path, full_src_path) < 0) {
                 return;
             }
 
@@ -768,156 +492,76 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
 
-            // look for the user in the sessions table
-            int dest_user_online = 0;
-            int dest_user_pid = -1;
-            int r2 = sem_lock(sem_id);
-            if(r2 < 0) {
-                send_err(clientSocket, -r2, "Failed to lock semaphore");
-                return;
-            }
-            for(int i = 0; i < shared_memory->session_table.count; i++) {
-                if(shared_memory->session_table.entries[i].in_use == 1 && strcmp(shared_memory->session_table.entries[i].username, transfer_command.buf2) == 0) {
-                    dest_user_online = 1;
-                    dest_user_pid = shared_memory->session_table.entries[i].pid;
-                    break;
-                }
-            }
-            r2 = sem_unlock(sem_id);
-            if(r2 < 0) {
-                send_err(clientSocket, -r2, "Failed to unlock semaphore");
+            pid_t dest_user_pid = -1;
+            int dest_online = 0;
+
+            // look if dest user is online, if so get their PID, else return error
+            int found = shm_session_find(shared_memory, sem_id, transfer_command.buf2, &dest_user_pid, &dest_online);
+
+            if(found < 0) {
+                send_err(clientSocket, ENOENT, "Destination user not found");
                 return;
             }
 
-            if(dest_user_online == 0){
-                // sender remains blocked until dest. user logs in 
+            if(!found || !dest_online) {
+                // dest. user is not online, request remains pending until they log in
+
+                // verify if dest. user exists
+                dest_online = 0;
+
                 struct passwd *pwd = getpwnam(transfer_command.buf2);
-                char dest_user_home[PATH_MAX + NAME_MAX + 2]; // +2 for '/' and '\0'
+                
+                char dest_user_home[PATH_MAX + NAME_MAX + 2];
                 struct stat dest_home_stat;
-                snprintf(dest_user_home, sizeof(dest_user_home), "%s/%.32s", session->root_path, transfer_command.buf2);
+                snprintf(dest_user_home, sizeof(dest_user_home), "%s/%s", session->root_path, transfer_command.buf2);
 
                 if(pwd == NULL || !is_csap_user(pwd) || stat(dest_user_home, &dest_home_stat) < 0 || !S_ISDIR(dest_home_stat.st_mode)) {
-                    const char *reason = "Destination user does not exist";
-                    send_err(clientSocket, ENOENT, reason);
+                    send_err(clientSocket, ENOENT, "Destination user does not exist");
                     return;
-
+    
                 }
             }
-            // insert the transfer request into the pending requests table in shared memory, looking for the first one available (either ACCEPTED or REJECTED) or if none is found, use the next available entry
 
-            transfer_request_entry_t new_request = {0};
-            strncpy(new_request.source_username, session->user, sizeof(new_request.source_username) - 1);
-            new_request.source_username[sizeof(new_request.source_username) - 1] = '\0';
-            strncpy(new_request.dest_username, transfer_command.buf2, sizeof(new_request.dest_username) - 1);
-            new_request.dest_username[sizeof(new_request.dest_username) - 1] = '\0';
-            strncpy(new_request.file_path_absolute, full_src_path, sizeof(new_request.file_path_absolute) - 1);
-            new_request.file_path_absolute[sizeof(new_request.file_path_absolute) - 1] = '\0';
-            new_request.status = PENDING;
+            int new_id = shm_request_add(shared_memory, sem_id, session->user, transfer_command.buf2, full_src_path);
 
-            r2 = sem_lock(sem_id);
-            if(r2 < 0) {
-                send_err(clientSocket, -r2, "Failed to lock semaphore");
-                return;
-            }
-            int found = 0;
-            int index_to_insert = -1;
-            for(int i = 0; i < shared_memory->pending_requests_table.count; i++) {
-                if(shared_memory->pending_requests_table.entries[i].status != PENDING) {
-                    shared_memory->pending_requests_table.entries[i] = new_request;
-                    index_to_insert = i;
-                    found = 1;
-                    break;
-                }
-            }
-            if(!found) {
-                if(shared_memory->pending_requests_table.count >= MAX_ENTRIES) {
-                    r2 = sem_unlock(sem_id);
-                    if(r2 < 0) {
-                        send_err(clientSocket, -r2, "Failed to unlock semaphore");
-                    }
-                    const char *reason = "Pending requests table is full";
-                    send_err(clientSocket, ENOMEM, reason);
-                    return;
-                }
-
-                index_to_insert = shared_memory->pending_requests_table.count;
-                shared_memory->pending_requests_table.entries[shared_memory->pending_requests_table.count++] = new_request;
-            }
-
-            int assigned_id = shared_memory->pending_requests_table.next_id++;
-            shared_memory->pending_requests_table.entries[index_to_insert].id = assigned_id;
-            
-            r2 = sem_unlock(sem_id);
-            if(r2 < 0) {
-                send_err(clientSocket, -r2, "Failed to unlock semaphore");
+            if(new_id < 0) {
+                send_err(clientSocket, ENOMEM, "Failed to add transfer request");
                 return;
             }
 
-            // notify dest user through FIFO if they're online
-            // if offline, the request will be pending until they log in and the server will notify them of the pending request
-            if(dest_user_online) {
+            if(dest_online){
+                char base_name[NAME_MAX + 1];
+                path_basename(base_name, sizeof(base_name), full_src_path);
 
-                // construct FIFO path based on the dest_user PID
-                char fifo_path[PATH_MAX + 64];
-                snprintf(fifo_path, sizeof(fifo_path), "%s/.sessions/fifo_%d", session->root_path, dest_user_pid);
-                // open the FIFO for writing
-                int fifo_fd = open(fifo_path, O_WRONLY | O_NONBLOCK);
-                if(fifo_fd < 0) {
-                    const char *reason = "Failed to open FIFO for destination user";
-                    send_err(clientSocket, errno, reason);
+                int r = notify_pid(session->root_path, dest_user_pid, "REQ|%d|%s\n", new_id, base_name);
+
+                if(r < 0){
+                    send_err(clientSocket, -r, "Failed to notify destination user about transfer request");
                     return;
                 }
-
-                // send the transfer request ID and the file path to the destination user process through the FIFO
-
-                // first obtain the basename of the source file path using a copy of the string to avoid modifying the original
-                char src_path_copy[PATH_MAX];
-                strncpy(src_path_copy, full_src_path, sizeof(src_path_copy) - 1);
-                src_path_copy[sizeof(src_path_copy) - 1] = '\0';
-                char *base_name = basename(src_path_copy);
-                if(base_name == NULL) {
-                    const char *reason = "Failed to extract basename from source file path";
-                    send_err(clientSocket, EINVAL, reason);
-                    close(fifo_fd);
-                    return;
-                }
-
-                char request_id_str[PATH_MAX + 64];
-                // send the ID and the basename of the file to the destination user process through the FIFO
-                snprintf(request_id_str, sizeof(request_id_str), "REQ|%d|%s\n", assigned_id, base_name);
-                ssize_t bytes_written = write(fifo_fd, request_id_str, strlen(request_id_str));
-                if(bytes_written < 0) {
-                    const char *reason = "Failed to write to FIFO for destination user";
-                    send_err(clientSocket, errno, reason);
-                    close(fifo_fd);
-                    return;
-                }
-                close(fifo_fd);
             }
+
+            // no message sent here as the client remains pending until dest. user accepts or rejects
 
             break;
         }
         case(CMD_CREATE): {
             cmd_t create_command;
-            if(parse_command(payload, &create_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
-                return;
+            if(cmd_parse(clientSocket, payload, &create_command) < 0) {
+                return; 
             }
 
             // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
-            int r = validate_path(create_command.buf, session->home_path, full_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, create_command.buf, session->home_path, full_path) < 0) {
                 return;
             }
 
-            long perms = 0;
-            r = validate_permissions(&perms, create_command.buf2);
-            if(r < 0) {
-                const char *reason = "Invalid permissions format";
-                send_err(clientSocket, EINVAL, reason);
-                return;
+            int r;
+
+            mode_t perms = 0;
+            if(cmd_perms(clientSocket, create_command.buf2, &perms) < 0) {
+                return; 
             }
 
             int create_result = create_cmd(full_path, perms, create_command.is_dir);
@@ -928,32 +572,26 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             }
 
             const char *reason = "File/Directory created successfully";
-            send_ok(clientSocket, reason, strlen(reason));
+            send_ok_str(clientSocket, reason);
 
             break;
         }
         case(CMD_CHMOD): {
 
             cmd_t chmod_command;
-            if(parse_command(payload, &chmod_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
+            if(cmd_parse(clientSocket, payload, &chmod_command) < 0) {
                 return;
             }
 
             // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
-            int r = validate_path(chmod_command.buf, session->home_path, full_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, chmod_command.buf, session->home_path, full_path) < 0) {
                 return;
             }
 
-            long perms = 0;
-            r = validate_permissions(&perms, chmod_command.buf2);
-            if(r < 0) {
-                const char *reason = "Invalid permissions format";
-                send_err(clientSocket, EINVAL, reason);
-                return;
+            mode_t perms;
+            if(cmd_perms(clientSocket, chmod_command.buf2, &perms) < 0) {
+                return; 
             }
 
             int chmod_result = chmod_cmd(full_path, perms);
@@ -964,30 +602,25 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             }
 
             const char *reason = "Permissions changed successfully";
-            send_ok(clientSocket, reason, strlen(reason));
+            send_ok_str(clientSocket, reason);
 
             break;
         }
         case(CMD_MOVE): {
             cmd_t move_command;
-            if(parse_command(payload, &move_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
+            if(cmd_parse(clientSocket, payload, &move_command) < 0) {
                 return;
             }
 
             // validate source path against home_path, if not valid return error
             char full_src_path[PATH_MAX];
-            int r = validate_path(move_command.buf, session->home_path, full_src_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, move_command.buf, session->home_path, full_src_path) < 0) {
                 return;
             }
 
             // validate destination path against home_path, if not valid return error
             char full_dest_path[PATH_MAX];
-            r = validate_path(move_command.buf2, session->home_path, full_dest_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, move_command.buf2, session->home_path, full_dest_path) < 0) {
                 return;
             }
 
@@ -1042,7 +675,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
 
                 }
 
-                if(S_ISDIR(dest_stat.st_mode)){
+                if(S_ISDIR(dest_stat.st_mode) && S_ISREG(src_stat.st_mode)){ // check if source is a file, if it's a dir use rename()
 
                     char src_path_copy[PATH_MAX];
                     strncpy(src_path_copy, full_src_path, sizeof(src_path_copy) - 1);
@@ -1071,19 +704,18 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 
             }
 
-            r = acquire_write_lock(dest_fd, 0, 0);
-            if(r<0) {
-                const char *reason = "Failed to acquire write lock on destination file";
-                send_err(clientSocket, -r, reason);
-                if(src_fd >= 0) {
-                    release_lock(src_fd, 0, 0);
-                    close(src_fd);
-                }
-                if(dest_fd >= 0) {
-                    release_lock(dest_fd, 0, 0);
+            if(dest_fd >= 0) { // write lock only obtained if destination is a file, if it's a dir, we just created the file and we don't need to lock it
+                int r = acquire_write_lock(dest_fd, 0, 0);
+                if(r < 0) {
+                    const char *reason = "Failed to acquire write lock on destination file";
+                    send_err(clientSocket, -r, reason);
+                    if(src_fd >= 0) {
+                        release_lock(src_fd, 0, 0);
+                        close(src_fd);
+                    }
                     close(dest_fd);
+                    return;
                 }
-                return;
             }
             
 
@@ -1104,7 +736,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             }
 
             const char *reason = "File/Directory moved successfully";
-            send_ok(clientSocket, reason, strlen(reason));
+            send_ok_str(clientSocket, reason);
 
             // unlock
             if(src_fd >= 0) {
@@ -1120,16 +752,13 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         }
         case(CMD_CD): {
             cmd_t cd_command;
-            if(parse_command(payload, &cd_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
+            if(cmd_parse(clientSocket, payload, &cd_command) < 0) {
                 return;
             }
 
             // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
-            int r = validate_path(cd_command.buf, session->home_path, full_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, cd_command.buf, session->home_path, full_path) < 0) {
                 return;
             }
 
@@ -1141,471 +770,120 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             }
 
             const char *reason = "Directory changed successfully";
-            send_ok(clientSocket, reason, strlen(reason));
+            send_ok_str(clientSocket, reason);
 
             break;
         }
         case(CMD_DOWNLOAD_BEGIN): {
             cmd_t download_command;
-            if(parse_command(payload, &download_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
+            if(cmd_parse(clientSocket, payload, &download_command) < 0) {
                 return;
             }
 
             // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
-            int r = validate_path(download_command.buf, session->home_path, full_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, download_command.buf, session->home_path, full_path) < 0) {
                 return;
             }
 
-            // open file contained in validated path
-            int file_fd = open(full_path, O_RDONLY);
-            if(file_fd < 0) {
-                const char *reason = "Failed to open file";
-                send_err(clientSocket, errno, reason);
+            ssize_t n = send_file(clientSocket, full_path, (off_t)0, CMD_DATA, CMD_DATA_END, error_msg, err_size);
+
+            if(n < 0) {
+                send_err(clientSocket, (int)-n, error_msg[0] ? error_msg : "Failed to download file");
                 return;
             }
 
-            // acquire read lock, to prevent other processes from writing to the file while it is being downloaded
-            int rlk = acquire_read_lock(file_fd, 0, 0);
-            if(rlk < 0) {
-                const char *reason = "Failed to acquire read lock";
-                send_err(clientSocket, -rlk, reason);
-                close(file_fd);
-                return;
-            }
-
-            // obtain info about file
-            struct stat file_stat;
-            if(fstat(file_fd, &file_stat) < 0) {
-                const char *reason = "Failed to get file info";
-                send_err(clientSocket, errno, reason);
-                release_lock(file_fd, 0, 0);
-                close(file_fd);
-                return;
-            }
-
-            // check if a regular file, if not return error
-            if(!S_ISREG(file_stat.st_mode)) {
-                send_err(clientSocket, EISDIR, "Not a regular file");
-                release_lock(file_fd, 0, 0);
-                close(file_fd);
-                return;
-            }
-
-            // compute file size
-            uint64_t file_size = (uint64_t)file_stat.st_size;
-
-            // send an initial OK to client to indicate that the download operation is starting, with the size of the file as payload
-            char size_payload[32];
-            int size_payload_len = snprintf(size_payload, sizeof(size_payload), "%llu", (unsigned long long)file_size);
-            send_ok(clientSocket, size_payload, size_payload_len);
-
-            uint8_t data_code = CMD_DATA;
-            uint8_t end_code = CMD_DATA_END;
-
-            // send the file stream to the client
-            ssize_t stream_result = send_stream(clientSocket, file_fd, 0, data_code, end_code);
-
-            // close descriptor
-            release_lock(file_fd, 0, 0);
-            close(file_fd);
-
-            if(stream_result < 0) {
-                const char *reason = "Failed to send file stream";
-                send_err(clientSocket, (int)-stream_result, reason);
-                return;
-            }
             break;
+            
         }
         case(CMD_READ): {
             cmd_t read_command;
-            if(parse_command(payload, &read_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
+            if(cmd_parse(clientSocket, payload, &read_command) < 0) {
                 return;
-            }
-
-            if(read_command.offset < 0){
-                read_command.offset = 0; // default offset to 0
             }
 
             // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
-            int r = validate_path(read_command.buf, session->home_path, full_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, read_command.buf, session->home_path, full_path) < 0) {
                 return;
             }
 
-            // open file contained in validated path
-            int file_fd = open(full_path, O_RDONLY);
-            if(file_fd < 0) {
-                const char *reason = "Failed to open file";
-                send_err(clientSocket, errno, reason);
+            ssize_t n = send_file(clientSocket, full_path, (off_t)read_command.offset, CMD_READ_DATA, CMD_READ_END, error_msg, err_size);
+
+            if(n < 0) {
+                send_err(clientSocket, (int)-n, error_msg[0] ? error_msg : "Failed to read file");
                 return;
             }
 
-            // acquire read lock, to avoid other processes writing to the file while it is being read
-            int rlk = acquire_read_lock(file_fd, read_command.offset, 0);
-            if(rlk < 0) {
-                const char *reason = "Failed to acquire read lock";
-                send_err(clientSocket, -rlk, reason);
-                close(file_fd);
-                return;
-            }
-
-            // obtain info about file
-            struct stat file_stat;
-            if(fstat(file_fd, &file_stat) < 0) {
-                const char *reason = "Failed to get file info";
-                send_err(clientSocket, errno, reason);
-                release_lock(file_fd, read_command.offset, 0);
-                close(file_fd);
-                return;
-            }
-
-            // check if file is a regular file, if not return error
-            if(!S_ISREG(file_stat.st_mode)) {
-                send_err(clientSocket, EISDIR, "Not a regular file");
-                release_lock(file_fd, read_command.offset, 0);
-                close(file_fd);
-                return;
-            }
-
-            // compute file_size
-            uint64_t file_size = (uint64_t)file_stat.st_size;
-
-            // obtain offset from read_command
-            off_t offset = (off_t)read_command.offset;
-            // determine amount of bytes to send, size - offset, if offset is greater than size, send 0 bytes
-            uint64_t bytes_to_send = 0;
-            if(file_size > (uint64_t)offset) {
-                bytes_to_send = file_size - (uint64_t)offset;
-            }
-
-            // send OK to client, indicating that the read operation is starting, with the size of the data to be sent as payload
-            // size is computed removing the offset from the total size of the file, so client can detect truncated answer
-            char size_payload[32];
-            int size_payload_len = snprintf(size_payload, sizeof(size_payload), "%llu", (unsigned long long)bytes_to_send);
-            send_ok(clientSocket, size_payload, size_payload_len);
-
-            uint8_t data_code = CMD_READ_DATA;
-            uint8_t end_code = CMD_READ_END;
-
-            // send the file stream to the client
-            ssize_t stream_result = send_stream(clientSocket, file_fd, offset, data_code, end_code);
-
-            // release lock
-            release_lock(file_fd, read_command.offset, 0);
-
-            // close descriptor
-            close(file_fd);
-
-            if(stream_result < 0) {
-                const char *reason = "Failed to send file stream";
-                send_err(clientSocket, (int)-stream_result, reason);
-                return;
-            }
-            
             break;
         }
         case(CMD_UPLOAD_BEGIN): {
             cmd_t upload_command;
-            if(parse_command(payload, &upload_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
+            if(cmd_parse(clientSocket, payload, &upload_command) < 0) {
                 return;
             }
 
             // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
-            int r = validate_path(upload_command.buf2, session->home_path, full_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, upload_command.buf2, session->home_path, full_path) < 0) {
                 return;
             }
 
-            
-            mode_t dest_mode = 0700; // default permissions for file
-            struct stat dest_stat;
-            if(stat(full_path, &dest_stat) == 0) {
-                dest_mode = dest_stat.st_mode & 07777; // retrieve permissions of existing file
-            } // I obtain permissions as mkstemp() creates temp file with 0600 permissions, and after succesful upload I restore the permissions of dest. file
+            // target struct
+            target_t target;
+            target.data_code = CMD_DATA;
+            target.end_code = CMD_DATA_END;
+            target.path = full_path;
+            target.offset = -1;
 
-            // write in a temp file until successful upload, then rename it, avoiding problems due to crashes
-            char temp_path[PATH_MAX];
-            temp_path[0] = '\0';
-            int file_fd = open_temp_for_upload(full_path, temp_path, sizeof(temp_path));
-            if(file_fd < 0) {
-                const char *reason = "Failed to open temporary file for upload";
-                send_err(clientSocket, -file_fd, reason);
-                return;
+            ssize_t n = receive_into_file(clientSocket, &target, error_msg, err_size);
+            if(n < 0) {
+                send_err(clientSocket, (int)-n, error_msg[0] ? error_msg : "Failed to receive data into file");
+                return; 
             }
 
-            // check if destination file exists
-            int existed = (stat(full_path, &dest_stat) == 0);
-
-            // open the destination with O_WRONLY | O_CREAT | O_NOFOLLOW to avoid following symlinks, and with 0700 permissions
-            int lock_fd = open(full_path, O_WRONLY | O_CREAT | O_NOFOLLOW, 0700);
-            if(lock_fd < 0) {
-                const char *reason = "Failed to open destination file for locking";
-                send_err(clientSocket, errno, reason);
-                close(file_fd);
-                unlink(temp_path); // remove temporary file
-                return;
-            }
-
-            int rl = acquire_write_lock(lock_fd, 0, 0);
-            if(rl < 0) {
-                const char *reason = "Failed to acquire write lock on destination file";
-                send_err(clientSocket, -rl, reason);
-                close(file_fd);
-                close(lock_fd);
-                unlink(temp_path); // remove temporary file
-                if(!existed) unlink(full_path); // remove destination file if it did not exist before
-                return;
-            }
-
-
-            // tell client to start sending data
-            const char *reason = "Ready to receive data";
-            send_ok(clientSocket, reason, strlen(reason));
-
-            // start receiving stream
-            uint8_t data_code = CMD_DATA;
-            uint8_t end_code = CMD_DATA_END;
-
-            // offset -1: never seek, the temporary file is empty
-            ssize_t stream_result = recv_stream(clientSocket, file_fd, -1, -1, data_code, end_code, error_msg, err_size);
-            if(stream_result < 0) {
-                release_lock(lock_fd, 0, 0);
-                close(lock_fd);
-                unlink(temp_path); // remove temporary file if upload failed
-                if(!existed) unlink(full_path);
-                send_err(clientSocket, (int)-stream_result,
-                         error_msg[0] ? error_msg : "Failed to receive file stream");
-                return;
-            }
-
-            // restore the permissions of the destination on the temporary file
-            if(fchmod(file_fd, dest_mode) < 0) {
-                int saved = errno;
-                release_lock(lock_fd, 0, 0);
-                close(lock_fd);
-                unlink(temp_path);
-                if(!existed) unlink(full_path);
-                send_err(clientSocket, saved, "Failed to set permissions on uploaded file");
-                return;
-            }
-
-            if(close(file_fd) < 0) {
-                int saved = errno;
-                release_lock(lock_fd, 0, 0);
-                close(lock_fd);
-                unlink(temp_path);
-                if(!existed) unlink(full_path);
-                send_err(clientSocket, saved, "Failed to close temporary file");
-                return;
-            }
-
-            // update final dest
-            if(rename(temp_path, full_path) < 0) {
-                int saved = errno;
-                release_lock(lock_fd, 0, 0);
-                close(lock_fd);
-                unlink(temp_path);
-                if(!existed) unlink(full_path);
-                send_err(clientSocket, saved, "Failed to install uploaded file");
-                return;
-            }
-
-            // unlock
-            release_lock(lock_fd, 0, 0);
-            close(lock_fd);
-
-            // send confirmation with N bytes written
-            char bytes_written_payload[32];
-            int bytes_written_payload_len = snprintf(bytes_written_payload, sizeof(bytes_written_payload), "%lld", (long long)stream_result);
-            send_ok(clientSocket, bytes_written_payload, bytes_written_payload_len);
+            char payload[32];
+            int payload_len = snprintf(payload, sizeof(payload), "%lld", (long long)n);
+            send_ok(clientSocket, payload, payload_len);
             break;
         }
         case(CMD_WRITE): {
             cmd_t write_command;
-            if(parse_command(payload, &write_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
-                return;
-            }
+            if(cmd_parse(clientSocket, payload, &write_command)) return;
 
-            // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
-            int r = validate_path(write_command.buf, session->home_path, full_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, write_command.buf, session->home_path, full_path)) return;
+
+            // initialize target struct to hold information about write operation
+            target_t target;
+            target.data_code = CMD_WRITE_DATA;
+            target.end_code = CMD_WRITE_END;
+
+            target.path = full_path;
+            target.offset = (off_t)write_command.offset;
+
+            // receive into full_path content
+            ssize_t n = receive_into_file(clientSocket, &target, error_msg, err_size);
+            if(n < 0) {
+                send_err(clientSocket, (int)-n, error_msg[0] ? error_msg : "Failed to receive data into file");
                 return;
             }
 
-            // open file contained in validated path
-            off_t offset = (off_t)write_command.offset;
-
-            // save permissions (like in upload) to restore them after writing, as the file may be truncated
-            mode_t dest_mode = 0700; // default permissions
-            struct stat dest_stat;
-            if(stat(full_path, &dest_stat) == 0) {
-                dest_mode = dest_stat.st_mode & 07777;
-            }
-
-            // with specified offset, open file in write mode with O_CREAT and 0700 permissions, otherwise open in truncate mode (O_TRUNC)
-            char temp_path[PATH_MAX];
-            temp_path[0] = '\0';
-            int file_fd;
-            if(offset >= 0) {
-                file_fd = open(full_path, O_WRONLY | O_CREAT | O_NOFOLLOW, 0700);
-                if(file_fd < 0) {
-                    const char *reason = "Failed to open file for writing";
-                    send_err(clientSocket, errno, reason);
-                    return;
-                }
-            } else {
-                // open with temporary file to avoid truncating the original file until the write is complete
-                file_fd = open_temp_for_upload(full_path, temp_path, sizeof(temp_path));
-                if(file_fd < 0) {
-                    const char *reason = "Failed to open temporary file for writing";
-                    send_err(clientSocket, -file_fd, reason);
-                    return;
-                }
-            }
-
-            // check if file existed
-            int existed = (stat(full_path, &dest_stat) == 0);
-
-            int lock_fd = -1;
-
-            // I set the lock on the actual file on which we want to write, and to check which one to lock
-            // I check trhough the temp_path, if it is empty, it means that we are writing to the actual file, 
-            // otherwise we are writing to a temporary file and we need to lock the actual file
-            if(temp_path[0] == '\0'){
-                // there is an offset, so lock_fd = file_fd
-                lock_fd = file_fd;
-            } else {
-                lock_fd = open(full_path, O_WRONLY | O_CREAT | O_NOFOLLOW, 0700);
-                if(lock_fd < 0) {
-                    const char *reason = "Failed to open file for locking";
-                    send_err(clientSocket, errno, reason);
-                    close(file_fd);
-                    if(temp_path[0] != '\0') {
-                        unlink(temp_path); // remove temp file
-                    }                   
-                    return;
-                }
-            }
-
-            // take lock 
-            int rl = acquire_write_lock(lock_fd, 0, 0);
-            if(rl < 0) {
-                const char *reason = "Failed to acquire write lock on file";
-                send_err(clientSocket, -rl, reason);
-                close(file_fd);
-                if(lock_fd != file_fd) {
-                    close(lock_fd);
-                }
-                if(temp_path[0] != '\0') {
-                    unlink(temp_path); // remove temp file
-                }
-                if(!existed) unlink(full_path); // remove destination if it did not exist before 
-                return;
-            }
-
-
-            // tell client to start sending data
-            const char *reason = "Ready to receive data";
-            send_ok(clientSocket, reason, strlen(reason));
-
-            // start receiving stream
-            uint8_t data_code = CMD_WRITE_DATA;
-            uint8_t end_code = CMD_WRITE_END;
-
-            ssize_t stream_result = recv_stream(clientSocket, file_fd, offset, -1, data_code, end_code, error_msg, err_size);
-            if(stream_result < 0) {
-                if(!existed) unlink(full_path);
-                if(lock_fd >=0 && lock_fd != file_fd) {
-                    release_lock(lock_fd, 0, 0);
-                    close(lock_fd);
-                    close(file_fd);
-                } else if(lock_fd == file_fd) {
-                    release_lock(lock_fd, 0, 0);
-                    close(lock_fd);
-                }
-                if(temp_path[0] != '\0') {
-                    unlink(temp_path); // remove temp file
-                }
-                send_err(clientSocket, (int)-stream_result,
-                         error_msg[0] ? error_msg : "Failed to receive file stream");
-                return;
-            }
-
-            if(temp_path[0] != '\0') { // if a temporary file was used
-                // restore the permissions of the destination and commit to effective file
-                if(fchmod(file_fd, dest_mode) < 0) {
-                    int saved = errno;
-                    release_lock(lock_fd, 0, 0);
-                    close(lock_fd);
-                    close(file_fd);
-                    unlink(temp_path);
-                    if(!existed) unlink(full_path);
-                    send_err(clientSocket, saved, "Failed to set permissions on written file");
-                    return;
-                }
-                if(close(file_fd) < 0) {
-                    int saved = errno;
-                    release_lock(lock_fd, 0, 0);
-                    close(lock_fd);
-                    unlink(temp_path);
-                    if(!existed) unlink(full_path);
-                    send_err(clientSocket, saved, "Failed to close temporary file");
-                    return;
-                }
-                if(rename(temp_path, full_path) < 0) {
-                    int saved = errno;
-                    release_lock(lock_fd, 0, 0);
-                    close(lock_fd);
-                    unlink(temp_path);
-                    if(!existed) unlink(full_path);
-                    send_err(clientSocket, saved, "Failed to install written file");
-                    return;
-                }
-            } else {    
-                release_lock(lock_fd, 0, 0);
-                close(lock_fd);
-                close(file_fd);
-                lock_fd = -1;
-            }
-
-            // if lock_fd > 0, a temp file was used
-            if(lock_fd >= 0){
-                release_lock(lock_fd, 0, 0);
-                close(lock_fd);
-            }
-
-            // send confirmation with N B
-            char bytes_written_payload[32];
-            int bytes_written_payload_len = snprintf(bytes_written_payload, sizeof(bytes_written_payload), "%lld", (long long)stream_result);
-            send_ok(clientSocket, bytes_written_payload, bytes_written_payload_len);
-
+            char payload[32];
+            int payload_len = snprintf(payload, sizeof(payload), "%lld", (long long)n);
+            send_ok(clientSocket, payload, payload_len);
             break;
+
         }
         case(CMD_DELETE): {
             cmd_t delete_command;
-            if(parse_command(payload, &delete_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
+            if(cmd_parse(clientSocket, payload, &delete_command) < 0) {
                 return;
             }
 
             // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
-            int r = validate_path(delete_command.buf, session->home_path, full_path);
-            if(r < 0) {
-                send_err(clientSocket, -r, path_error_reason(-r));
+            if(cmd_resolve(clientSocket, delete_command.buf, session->home_path, full_path) < 0) {
                 return;
             }
 
@@ -1651,7 +929,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
             const char *reason = "File/Directory deleted successfully";
-            send_ok(clientSocket, reason, strlen(reason));
+            send_ok_str(clientSocket, reason);
             
             // release lock on parent directory
             if(fd >= 0) {
@@ -1664,15 +942,13 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
         case(CMD_LIST): {
             // tokenize payload with parse_command()
             cmd_t list_command;
-            if(parse_command(payload, &list_command, error_msg, err_size) < 0) {
-                send_err(clientSocket, EINVAL, error_msg);
+            if(cmd_parse(clientSocket, payload, &list_command) < 0) {
                 return;
             }
 
             // if path is NULL (from payload), pass NULL to list() to list current working directory
             // validate cwd against root_path, if not valid return error
             char full_path[PATH_MAX];
-            int r;
             if(list_command.buf[0] == '\0') {
                 // get current working directory
                 #if DEBUG
@@ -1694,9 +970,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 #endif
 
                 // allowed scope: root_path (for all other commands is home_path)
-                r = validate_path(list_command.buf, session->root_path, full_path);
-                if(r < 0) {
-                    send_err(clientSocket, -r, path_error_reason(-r));
+                if(cmd_resolve(clientSocket, list_command.buf, session->root_path, full_path) < 0) {
                     return;
                 }
             }
@@ -1889,27 +1163,16 @@ void handle_session(int clientSocket) {
         }
     }
 
-    // cleanup any pending requests made by this user
+    // remove any stale requests
     if(session.logged_in){
-        int rr = sem_lock(sem_id);
-        if(rr == 0){
-            for(int i = 0; i < shared_memory->pending_requests_table.count; i++){
-                transfer_request_entry_t *entry = &shared_memory->pending_requests_table.entries[i];
-                if(entry->status == PENDING && strcmp(entry->source_username, session.user) == 0){
-                    // mark as failed
-                    entry->status = FAILED;
-                }
-            }
-            sem_unlock(sem_id);
-        }
-
+        shm_requests_set_failed(shared_memory, sem_id, session.user);
     }
 
     // cleanup session resources
     if(session.notify_fd >= 0) {
         close(session.notify_fd);
         char fifo_name[PATH_MAX + 64];
-        snprintf(fifo_name, sizeof(fifo_name), "%s/.sessions/fifo_%d", session.root_path, getpid());
+        session_fifo_path(fifo_name, sizeof(fifo_name), session.root_path, getpid());
         seteuid(0); // set effective UID to root to allow unlinking the fifo
         unlink(fifo_name); // remove the fifo
     }
@@ -2055,6 +1318,8 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, handle_termination); // handle SIGTERM to cleanup before exiting
     signal(SIGINT, handle_termination); 
 
+    setup_unprivileged_user(); // setup unprivileged user for handling client requests
+
     // setup server socket
     int s = start_server(ip_address, port_number);
 
@@ -2133,6 +1398,13 @@ int main(int argc, char *argv[]) {
                 continue;
             } else if(pid == 0) { // child process
                 close(s); // child does not need the listening socket
+
+                // as soon as the fork is executed, drop privileges to nobody/nogroup 
+                if(drop_privileges()<0){
+                    perror("drop_privileges");
+                    close(clientSocket);
+                    _exit(EXIT_FAILURE);
+                }
 
                 // handle the client session and the exit
                 handle_session(clientSocket);

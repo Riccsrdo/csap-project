@@ -8,6 +8,7 @@
 #include<limits.h>
 #include<errno.h>
 #include<unistd.h>
+#include<libgen.h>
 #include<stdio.h>
 
 #define DEBUG 0
@@ -45,5 +46,13 @@ int write_all(int fd, const void *buf, ssize_t count);
 int open_temp_for_upload(const char *dest_path, char *temp_path_out, size_t out_size);
 
 ssize_t read_line(int fd, char *buf, size_t size, int *eof_flag);
+
+void path_basename(char *dst, size_t n, const char *src);
+
+extern uid_t unpriv_uid;
+extern gid_t unpriv_gid;
+
+void setup_unprivileged_user(void);
+int drop_privileges(void);
 
 #endif

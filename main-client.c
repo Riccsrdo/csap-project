@@ -70,20 +70,9 @@ int start_client(char *ip_address, char *port_number){
         exit(EXIT_FAILURE);
     }
 
-    struct sockaddr_in server_address; // struct to memorize server address information
-    memset(&server_address, 0, sizeof(server_address)); // prepare memory for the struct
-
-    server_address.sin_family = AF_INET; // IPv4
-    int port = atoi(port_number); // convert port number from string to integer
-    if(port <= 0 || port > 65535) {
-        fprintf(stderr, "Invalid port number: %s\n", port_number);
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
-    server_address.sin_port = htons(port); // port number, converted to network byte order
-
-    if(inet_aton(ip_address, &server_address.sin_addr) == 0) { // convert string to network address
-        fprintf(stderr, "Invalid IP address: %s\n", ip_address);
+    struct sockaddr_in server_address;
+    // construct the socket endpoint from the given IP address and port number
+    if(make_endpoint(ip_address, port_number, &server_address) < 0){
         close(sockfd);
         exit(EXIT_FAILURE);
     }

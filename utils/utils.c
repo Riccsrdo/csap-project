@@ -163,3 +163,12 @@ ssize_t read_line(int fd, char *buf, size_t size, int *eof_flag) {
     buf[i] = '\0';
     return (ssize_t)i;
 }
+
+/*
+Constructs the basename of a given path and stores it in the provided output buffer.
+*/
+void path_basename(char *dst, size_t n, const char *src) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", src);
+    snprintf(dst, n, "%s", basename(tmp));
+}

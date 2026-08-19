@@ -1113,10 +1113,23 @@ void handle_session(int clientSocket) {
                 #endif
             } else if(strncmp(notify_buffer, "REQ|", 4) == 0) {
 
-                char *request_id = strtok(notify_buffer + 4, "|");
+                char *request_id = notify_buffer + 4;
+                char *separator = strchr(request_id, '|');
+                const char *file_name = (separator != NULL && separator[1] != '\0') ? separator + 1 : NULL;
+                int id_len = (separator != NULL) ? (int)(separator - request_id) : (int)strlen(request_id);
+                if(id_len > 16){
+                    id_len = 16; // limit to 16 characters
+                }
 
                 char message[PATH_MAX + 64];
-                snprintf(message, sizeof(message), "Transfer request with ID %s received",  request_id);
+                if(id_len == 0){
+                    snprintf(message, sizeof(message), "Received malformed transfer request notification");
+                } else if(file_name == NULL) {
+                    snprintf(message, sizeof(message), "Received transfer request notification with ID %.*s", id_len, request_id);
+                } else {
+                    snprintf(message, sizeof(message), "Received transfer request notification with ID %.*s for file: %s", id_len, request_id, file_name);
+                }
+
 
                 send_packet(clientSocket, RSP_NOTIFY, message, strlen(message));
 

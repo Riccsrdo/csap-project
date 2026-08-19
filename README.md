@@ -310,7 +310,7 @@ The other user receives the request:
 `raffaele`:
 
 ```
-Transfer request with ID 1 received
+[NOTIFY]: Transfer request with ID 1 received for file 'temp.txt'
 ```
 
 #### `accept <directory> <ID>`

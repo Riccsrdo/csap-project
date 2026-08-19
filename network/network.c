@@ -41,7 +41,7 @@ int send_data(int sockfd, const void *buf, size_t len){
     while(len > 0){
         ssize_t n = send(sockfd, ptr, len, 0);
         if(n < 0){
-            if(errno == EINTR) // if interrupted by signal, retry
+            if(errno == EINTR)
                 continue;
             return -1;
         }
@@ -66,7 +66,7 @@ int receive_data(int sockfd, void *buf, size_t len){
             return -1;
         }
         if(n < 0){
-            if(errno == EINTR) // if interrupted by signal, retry
+            if(errno == EINTR)
                 continue;
             return -1;
         }

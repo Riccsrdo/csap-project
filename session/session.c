@@ -171,7 +171,7 @@ int setup_server_gid(char *error_msg, uint32_t err_size) {
         return -1;
     }
 
-    // create the group, using fork() and execlp to call groupadd
+    // create the group, using fork() and execvp to call groupadd
     char *argv[] = { "groupadd", "csap_group", NULL};
     if(run_exec("groupadd", argv) < 0){
         snprintf(error_msg, err_size - 1, "Failed to create group: %s", strerror(errno));
@@ -239,7 +239,7 @@ int handle_create_user(const char* username, mode_t perms, const char* root, cha
             return rc;
         }
 
-        // handle user creation using fork() and execlp to call useradd
+        // handle user creation using fork() and execvp to call useradd
         char *argv[] = { "adduser", "--disabled-password", "--gecos", "", "--ingroup", "csap_group", "--no-create-home", (char *)username, NULL};
         if(run_exec("adduser", argv) < 0){
             strncpy(err_msg, "Failed to create user", err_size - 1);

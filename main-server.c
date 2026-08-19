@@ -383,8 +383,8 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             path_basename(base_name, sizeof(base_name), request_copy.file_path_absolute);
 
             // final path of copying given by <dir> plus file name
-            char full_dest_file_path[PATH_MAX];
-            snprintf(full_dest_file_path, sizeof(full_dest_file_path), "%s/%s", full_dest_path, base_name);
+            char full_dest_file_path[PATH_MAX + NAME_MAX + 2];
+            snprintf(full_dest_file_path, sizeof(full_dest_file_path), "%s/%.*s", full_dest_path, NAME_MAX, base_name);
 
             int copy_result = execute_transfer_copy(request_copy.file_path_absolute, full_dest_file_path);
             if(copy_result < 0) {
@@ -414,7 +414,7 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
             }
 
             char msg[128 + NAME_MAX];
-            snprintf(msg, sizeof(msg), "Transfer request accepted successfully, file copied to %s", full_dest_file_path);
+            snprintf(msg, sizeof(msg), "Transfer request accepted successfully, file copied to %.*s", NAME_MAX, base_name);
             send_ok_str(clientSocket, msg);
 
             break;
@@ -513,12 +513,17 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 
                 char dest_user_home[PATH_MAX + NAME_MAX + 2];
                 struct stat dest_home_stat;
-                snprintf(dest_user_home, sizeof(dest_user_home), "%s/%s", session->root_path, transfer_command.buf2);
+                snprintf(dest_user_home, sizeof(dest_user_home), "%s/%.32s", session->root_path, transfer_command.buf2);
 
                 if(pwd == NULL || !is_csap_user(pwd) || stat(dest_user_home, &dest_home_stat) < 0 || !S_ISDIR(dest_home_stat.st_mode)) {
                     send_err(clientSocket, ENOENT, "Destination user does not exist");
                     return;
     
+                }
+
+                if(strcmp(transfer_command.buf2, session->user) == 0) {
+                    send_err(clientSocket, EINVAL, "Cannot transfer a file to yourself");
+                    return;
                 }
             }
 
@@ -557,8 +562,6 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
 
-            int r;
-
             mode_t perms = 0;
             if(cmd_perms(clientSocket, create_command.buf2, &perms) < 0) {
                 return; 
@@ -583,7 +586,6 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
 
-            // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
             if(cmd_resolve(clientSocket, chmod_command.buf, session->home_path, full_path) < 0) {
                 return;
@@ -756,7 +758,6 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
 
-            // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
             if(cmd_resolve(clientSocket, cd_command.buf, session->home_path, full_path) < 0) {
                 return;
@@ -780,7 +781,6 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
 
-            // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
             if(cmd_resolve(clientSocket, download_command.buf, session->home_path, full_path) < 0) {
                 return;
@@ -802,7 +802,6 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
 
-            // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
             if(cmd_resolve(clientSocket, read_command.buf, session->home_path, full_path) < 0) {
                 return;
@@ -823,7 +822,6 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
 
-            // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
             if(cmd_resolve(clientSocket, upload_command.buf2, session->home_path, full_path) < 0) {
                 return;
@@ -881,7 +879,6 @@ void dispatch(session_t *session, int clientSocket, uint8_t command, void *paylo
                 return;
             }
 
-            // validate path against home_path, if not valid return error
             char full_path[PATH_MAX];
             if(cmd_resolve(clientSocket, delete_command.buf, session->home_path, full_path) < 0) {
                 return;
@@ -1351,7 +1348,7 @@ int main(int argc, char *argv[]) {
             // read content from stdin
             ssize_t bytes_read = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
             if(bytes_read < 0) {
-                if(errno == EINTR) continue; // if interrupted by signal, retry
+                if(errno == EINTR) continue;
                 perror("read from stdin");
                 break;
             }
@@ -1383,7 +1380,7 @@ int main(int argc, char *argv[]) {
             clientSocket = accept(s, (struct sockaddr*)&clientAddress, &clientAddressLen);
 
             if(clientSocket < 0) {
-                if(errno == EINTR) continue; // if interrupted by signal, retry
+                if(errno == EINTR) continue;
                 perror("accept"); continue;
             }
 

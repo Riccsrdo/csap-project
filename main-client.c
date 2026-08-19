@@ -457,13 +457,13 @@ int main(int argc, char *argv[]) {
             if(command.is_background) {
                 if(command.code == CMD_UPLOAD_BEGIN || command.code == CMD_DOWNLOAD_BEGIN) {
                     spawn_background(&command, line, pipe_fd, socket_fd);
-                    if(local_fd > STDERR_FILENO) close(local_fd); // check to avoid closing stdin/stdout/stderr
+                    if(local_fd > STDERR_FILENO) close(local_fd); 
                     background_operations++;
                     printf("[INFO]: Background operation started. Total background operations: %d\n", background_operations);
                     continue; // continue to next iteration to wait for more input or server response
                 } else {
                     fprintf(stderr, "[ERROR]: Background operation is only supported for upload and download commands.\n");
-                    if(local_fd > STDERR_FILENO) close(local_fd); // check to avoid closing stdin/stdout/stderr
+                    if(local_fd > STDERR_FILENO) close(local_fd); 
                     continue; // continue to next iteration
                 }
             }
@@ -474,7 +474,7 @@ int main(int argc, char *argv[]) {
             int rc;
             if(is_stream) {
                 rc = run_stream_command(socket_fd, &command, local_fd);
-                if(local_fd > STDERR_FILENO) close(local_fd); //  check to avoid closing stdin/stdout/stderr
+                if(local_fd > STDERR_FILENO) close(local_fd); 
             } else {
                 rc = wait_response(socket_fd);
             }

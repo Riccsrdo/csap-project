@@ -169,7 +169,7 @@ ssize_t send_stream(int sockfd, int fd, off_t offset, uint8_t data_code, uint8_t
     while(1){
         ssize_t bytes_read = read(fd, buffer + HDR_SIZE, CHUNK_SIZE);
         if(bytes_read < 0){
-            if(errno == EINTR) continue; // if interrupted by signal, retry
+            if(errno == EINTR) continue;
             return -errno;
         }
         if(bytes_read == 0){

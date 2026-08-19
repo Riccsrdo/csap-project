@@ -3,7 +3,7 @@
 #define TRANSFER_H
 
 #include<netinet/in.h> // Address information
-#include"../network/network.h" // fix with makefile -I
+#include"../network/network.h"
 #include <stdint.h>
 #include <sys/types.h>
 #include"../locks/locks.h"

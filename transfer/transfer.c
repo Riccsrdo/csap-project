@@ -120,7 +120,7 @@ int execute_transfer_copy(const char *src_path, const char *dest_path){
         unlink(dest_path); // as I use the O_EXCL flag, removing is safe as the file has been created here
         return -read_errno;
     } else {
-        return 0; // success
+        return 0; 
     }
 
 

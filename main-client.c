@@ -18,12 +18,10 @@ Responsible for:
 #include<fcntl.h> // fcntl
 #include<sys/wait.h> // waitpid
 #include<errno.h> // EINTR
-//#include"network.h"
-#include"network/network.h" // fix with -I
-//#include"protocol.h"
-#include"protocol/protocol.h" // fix with -I
+#include"network/network.h"
+#include"protocol/protocol.h"
 #include "transfer/transfer.h"
-#include"utils/utils.h" // fix with -I
+#include"utils/utils.h"
 
 #define MAX_CLIENT_BUFFER PATH_MAX + 64
 #define MAX_SERVER_BUFFER PATH_MAX + 64
@@ -62,8 +60,7 @@ int setup_signal_handler() {
 Start the client with socket, return the socket descriptor.
 */
 int start_client(char *ip_address, char *port_number){
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0); // protocol is set to zero, associated automatically to
-    // SOCK_STREAM, which is TCP.
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
     if(sockfd < 0) {
         perror("socket");
@@ -137,7 +134,6 @@ int recv_response(int fd, char *out, size_t out_size, uint32_t *out_len, int pri
                 out[n] = '\0';
             }
             if(out_len) *out_len = payload_len;
-            //if print ok
             if(print_ok){
                 if(payload_len == 0 || payload == NULL) {
                     printf("[Server]: OK\n");

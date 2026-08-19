@@ -21,8 +21,7 @@ Responsible for:
 #include<sys/wait.h> // waitpid
 #include<errno.h>
 #include"utils/utils.h"
-//#include"network.h"
-#include"network/network.h" // fix with -I
+#include"network/network.h"
 #include"paths/paths.h"
 #include"protocol/protocol.h"
 #include"fsops/fsops.h"

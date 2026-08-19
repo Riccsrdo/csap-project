@@ -12,9 +12,6 @@ call validate_path and look for the result
 
 if != 0, the operation is outside the allowed scope, and should be rejected
 */
-
-// validate the path and check if it is within the provided root directory
-// 
 int validate_path(const char *path, const char *root, char *validated_path) {
 
     if(validated_path == NULL || path == NULL || root == NULL) {

@@ -22,7 +22,7 @@ int delete_cmd(const char *path) {
         }
     } else {
         // if it's a file
-        if(unlink(path) < 0) { // unlink is used to delete files, by removing the link to the file in the filesystem
+        if(unlink(path) < 0) { 
             return -errno;
         }
     }
@@ -145,16 +145,15 @@ int constructFileInfo(strbuf_t *sb, struct stat *fileStat, const char *filename)
                            filename);
 
     if (written < 0 || written >= (int) sizeof(line)) {
-        // error
         return -1;
     }
 
     // Append string using sb_append()
     if(sb_append(sb, line, strlen(line)) < 0) {
-        return -ENOMEM; // memory allocation error
+        return -ENOMEM; 
     }
 
-    return 0; // success
+    return 0; 
 }
 
 
@@ -177,7 +176,7 @@ int list(char *path, strbuf_t *sb) {
     if(sb->data == NULL) {
         int i = sb_init(sb);
         if(i < 0) {
-            return -ENOMEM; // memory allocation error
+            return -ENOMEM; 
         }
     }
 
@@ -220,7 +219,7 @@ int list(char *path, strbuf_t *sb) {
             int rc = constructFileInfo(sb, &fileStat, entry->d_name);
             if(rc < 0) {
                 closedir(dir);
-                return rc; // propagate error
+                return rc; 
             }
 
         }
@@ -234,10 +233,10 @@ int list(char *path, strbuf_t *sb) {
 
         int rc = constructFileInfo(sb, &fileStat, base_name);
         if(rc < 0) {
-            return rc; // propagate error
+            return rc; 
         }
     }
 
-    return 0; // success
+    return 0; 
 
 }

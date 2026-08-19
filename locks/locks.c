@@ -17,10 +17,10 @@ Returns 0 on success, or a negative error code on failure.
 */
 static int set_lock(int fd, int type, int cmd, off_t offset, off_t len) {
     struct flock lock = {0}; 
-    lock.l_type = type; // F_RDLCK, F_WRLCK, F_UNLCK
-    lock.l_whence = SEEK_SET; // relative to the start of the file
-    lock.l_start = offset; // starting offset for the lock
-    lock.l_len = len; // length of the locked region
+    lock.l_type = type; 
+    lock.l_whence = SEEK_SET; 
+    lock.l_start = offset;
+    lock.l_len = len;
 
     if(fcntl(fd, cmd, &lock) == -1) {
         return -errno; // return negative error code

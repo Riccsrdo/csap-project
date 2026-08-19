@@ -98,7 +98,7 @@ static int validate_username(const char *username, char *err_msg, uint32_t err_s
         return -1;
     }
     for(size_t i = 0; i < len; i++) {
-        unsigned char ch = (unsigned char)username[i]; // cast to unsigned char to avoid issues with negative values
+        unsigned char ch = (unsigned char)username[i];
         if(!isalnum(ch) && ch != '_' && ch != '-') { // check if character is not in [a-zA-Z0-9_-]
             snprintf(err_msg, err_size,
                 "Username can only contain letters, numbers, underscores and hyphens");
@@ -239,7 +239,7 @@ int handle_create_user(const char* username, mode_t perms, const char* root, cha
             return rc;
         }
 
-        // handle user creation using fork() and execvp to call useradd
+        // handle user creation using fork() and execvp to call adduser
         char *argv[] = { "adduser", "--disabled-password", "--gecos", "", "--ingroup", "csap_group", "--no-create-home", (char *)username, NULL};
         if(run_exec("adduser", argv) < 0){
             strncpy(err_msg, "Failed to create user", err_size - 1);

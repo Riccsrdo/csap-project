@@ -23,7 +23,7 @@ In `<root_directory>` the server keeps the user's home, their files and metadata
 
 ### User management
 We need to support the dynamic creation of users through `create_user <username> <permission (in octal)>`. After creating a user, we need to create its home directory (with the new user being the owner, and with correct permissions applied).
-- Important: all users must share the same group (e.g. remote_users).
+- Important: all users must share the same group (e.g. csap_group).
 
 Furthermore, we need to create a real user (for each user added) in the system (through the `exec()` function), using `adduser`, specifically `sudo adduser --disabled-password username`.
 

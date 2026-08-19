@@ -19,6 +19,8 @@
         7. [write](#write-path)
         8. [upload](#upload-client_path-server_path)
         9. [download](#download-server_path-client_path)
+        10. [delete](#delete-path)
+        11. [exit](#exit)
     - [Transfer Request](#transfer-request-mechanism)
         1. [transfer_request](#transfer_request-file-dest_user)
         2. [accept](#accept-directory-id)
@@ -56,7 +58,7 @@ sudo ./Server <root_dir> [<IP>] [<port>]
 
 **Example**:
 ```bash
-sudo ./Server /tmp/root_folder
+sudo ./Server /tmp/root2
 ```
 
 The server uses `sudo` to create real system users through `adduser`, as well as creating the common group at first start with `groupadd`, and to assign home directory properties with `chown`. Furthermore, it's temporarily used to perform the copying operation in the `transfer_req` module.
@@ -123,7 +125,7 @@ Creates a new user and its home dir inside the server's root.
 Rules:
 - Username must be 3 to 32 characters long, following standard naming conventions for usernames in UNIX like systems;
 - Permissions are in octal, following `0000` to `0777`.
-- Users will be put inside the `csap-group`.
+- Users will be put inside the `csap_group`.
 - No password required.
 
 ```bash
@@ -178,14 +180,6 @@ move test.txt test_directory/test.txt
 File/Directory moved successfully
 ```
 
-
-#### `delete <path>`
-Deletes a file or a directory. Directory must be empty before deletion.
-```
-delete text.txt
-[Server]: 
-File/Directory deleted successfully 
-```
 
 #### `cd <path>`
 Change current working directory
@@ -283,6 +277,14 @@ download new_file.txt /tmp/test_dir/new_file.txt -b
 [INFO]: Background operation started. Total background operations: 1
 [Server]: 29 bytes received
 [Background] Command: download new_file.txt /tmp/test_dir/new_file.txt concluded
+```
+
+#### `delete <path>`
+Deletes a file or a directory. Directory must be empty before deletion.
+```
+delete text.txt
+[Server]: 
+File/Directory deleted successfully 
 ```
 
 #### `exit`

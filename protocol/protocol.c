@@ -33,7 +33,7 @@ static const struct {
     { "reject", CMD_REJECT, 1, "reject <id>" },
     { "exit", CMD_EXIT, -1, "exit" }
 };
-#define NUM_CMDS (sizeof(CMDS) / sizeof(CMDS[0])) // divide total size of array by size of just one element
+#define NUM_CMDS (sizeof(CMDS) / sizeof(CMDS[0])) 
 
 
 // parse a command line into a cmd_t structure

@@ -14,7 +14,7 @@
 #include<fcntl.h> 
 #include<errno.h>
 #include<stdint.h>
-#include"../utils/utils.h" // fix with makefile -I
+#include"../utils/utils.h"
 
 
 #define MAX_PAYLOAD_SIZE (64 * 1024) // 64KB

@@ -8,25 +8,25 @@ Responsible for:
 #include"utils.h"
 
 int sb_init(strbuf_t *sb) {
-    sb->cap = 1024; // initial capacity
-    sb->len = 0; // initial length of the string
-    sb->data = malloc(sb->cap); // allocate memory for the string
+    sb->cap = 1024;
+    sb->len = 0; 
+    sb->data = malloc(sb->cap); 
     if (sb->data) {
         sb->data[0] = '\0';
     } else {
-        return -ENOMEM; // ENOMEM
+        return -ENOMEM; 
     }
     return 0;
 }
 
 int sb_append(strbuf_t *sb, const char *s, size_t n) {
-    if (!sb || !s) return -1; // if the strbuf_t pointer or the string pointer is NULL, return error
+    if (!sb || !s) return -1; 
 
     if (!sb->data) { // if the buffer is not initialized, initialize it
         int i;
         i = sb_init(sb);
-        if(i < 0) return -1; // ENOMEM
-        if (!sb->data) return -1; // ENOMEM
+        if(i < 0) return -1; 
+        if (!sb->data) return -1; 
     }
     
     // check if additional space is necessary
@@ -40,7 +40,7 @@ int sb_append(strbuf_t *sb, const char *s, size_t n) {
         
         char *new_data = realloc(sb->data, new_cap); // reallocate necessary space
         if (!new_data) {
-            return -1; // ENOMEM
+            return -1; 
         }
         
         sb->data = new_data;
@@ -49,7 +49,7 @@ int sb_append(strbuf_t *sb, const char *s, size_t n) {
     
     // copy the new string into the buffer and update length
     memcpy(sb->data + sb->len, s, n);
-    sb->len += n; // update current length of the string
+    sb->len += n; 
     sb->data[sb->len] = '\0'; //null-terminate the string
     
     return 0;
@@ -94,13 +94,13 @@ int write_all(int fd, const void *buf, ssize_t n){
         ssize_t written = write(fd, ptr, remaining);
         if(written < 0){
             if(errno == EINTR) continue; // interrupted by signal, retry
-            return -errno; // error
+            return -errno; 
         }
         ptr += written;
         remaining -= written;
     }
 
-    return 0; // success
+    return 0;
 }
 
 // create a temporary file in the same directory as dest_path, return its fd

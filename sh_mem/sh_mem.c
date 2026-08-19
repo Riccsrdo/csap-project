@@ -8,9 +8,9 @@ int sem_lock(int sem_id){
 
     while(semop(sem_id, &sb, 1) < 0){
         if(errno == EINTR) continue; // interrupted by signal, retry
-        return -errno; // error
+        return -errno; 
     }
-    return 0; // success
+    return 0; 
 }
 
 int sem_unlock(int sem_id){
@@ -21,9 +21,9 @@ int sem_unlock(int sem_id){
 
     while(semop(sem_id, &sb, 1) < 0){
         if(errno == EINTR) continue; // interrupted by signal, retry
-        return -errno; // error
+        return -errno; 
     }
-    return 0; // success
+    return 0; 
 }
 
 
@@ -104,7 +104,7 @@ int setup_shmem(int *smh_id, int *sem_id, shared_memory_t **shm_ptr_out, gid_t o
     // mark the shared memory for deletion, it will be deleted when all processes detach
     shmctl(shm_id_temp, IPC_RMID, NULL);
     
-    return 0; // success
+    return 0; 
 }
 
 void cleanup_shmem(int shm_id, int sem_id, shared_memory_t *shm_ptr){
@@ -266,7 +266,7 @@ int shm_request_add(shared_memory_t *mem, int sem, const char *src_user, const c
 
 /*
 Handles a request by ID, changing the status to new_status. 
-Returns 0, or -ENOENT if the request is not found, or -EACCESS if the request is not for the given dest_user, or -errno.
+Returns 0, or -ENOENT if the request is not found, or -EACCES if the request is not for the given dest_user, or -errno.
 */
 int shm_request_take(shared_memory_t *mem, int sem, int id, const char *dest_user, enum request_status new_status, transfer_request_entry_t *out) {
 
